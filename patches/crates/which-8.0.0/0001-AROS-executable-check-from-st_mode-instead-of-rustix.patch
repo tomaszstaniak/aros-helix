@@ -1,0 +1,58 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 02:40:23 +0200
+Subject: [PATCH] AROS: executable check from st_mode instead of rustix
+
+Repository: crates.io which 8.0.0 (archive SHA-256 d3fabb95...ba1d)
+Author: tomaszstaniak
+Date: 2026-10-19
+Platform scope: target_os = "aros"; other targets unchanged.
+Upstream status: local-only (not submitted).
+Problem: is_valid_executable uses rustix's access(), and rustix has no
+AROS backend.
+Change: on AROS a regular file with an execute bit in st_mode (the C
+library maps the AmigaDOS e bit there) counts as executable.
+Verification: builds for AROS; hx --health runs its lookups without error
+on AROS One 1.3. Not tested against a found program.
+Removal: when rustix gains an AROS backend.
+---
+ Cargo.toml |  2 +-
+ src/sys.rs | 12 +++++++++++-
+ 2 files changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/Cargo.toml b/Cargo.toml
+index 14c3279f174c478c4a0c4527ac9ae9b1cbc2633a..4d7dd932c55f127eb6c7b7ca220950d1440d3d70 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -70,7 +70,7 @@ default-features = false
+ [dev-dependencies.tempfile]
+ version = "3.9.0"
+ 
+-[target.'cfg(any(unix, target_os = "wasi", target_os = "redox"))'.dependencies.rustix]
++[target.'cfg(any(all(unix, not(target_os = "aros")), target_os = "wasi", target_os = "redox"))'.dependencies.rustix]
+ version = "1.0.5"
+ features = [
+     "fs",
+diff --git a/src/sys.rs b/src/sys.rs
+index e926ac9d5a0a252cb129c20d01086925faccf243..97e8b4f605830ed067156531774dc11508c4d0c4 100644
+--- a/src/sys.rs
++++ b/src/sys.rs
+@@ -206,7 +206,17 @@ impl Sys for RealSys {
+         std::fs::symlink_metadata(path)
+     }
+ 
+-    #[cfg(any(unix, target_os = "wasi", target_os = "redox"))]
++    // AROS: rustix has no backend there. The C library maps the AmigaDOS
++    // `e` protection bit to the execute bits of st_mode.
++    #[cfg(target_os = "aros")]
++    fn is_valid_executable(&self, path: &Path) -> io::Result<bool> {
++        use std::os::unix::fs::PermissionsExt;
++        #[allow(clippy::disallowed_methods)] // ok, sys implementation
++        let metadata = std::fs::metadata(path)?;
++        Ok(metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
++    }
++
++    #[cfg(any(all(unix, not(target_os = "aros")), target_os = "wasi", target_os = "redox"))]
+     fn is_valid_executable(&self, path: &Path) -> io::Result<bool> {
+         use rustix::fs as rfs;
+         rfs::access(path, rfs::Access::EXEC_OK)

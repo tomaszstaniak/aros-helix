@@ -1,0 +1,12 @@
+[package]
+name = "term-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The terminal layer Helix uses, on its own: raw mode, size, the event
+# stream under Tokio, and leaving raw mode again.
+[dependencies]
+crossterm = { version = "0.28", features = ["event-stream", "libc"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }

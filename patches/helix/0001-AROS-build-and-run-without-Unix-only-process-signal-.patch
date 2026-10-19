@@ -1,0 +1,754 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 01:13:37 +0200
+Subject: [PATCH 1/5] AROS: build and run without Unix-only process, signal and
+ network support
+
+Problem: Tokio's process, net and signal features need mio, which has no
+AROS backend; rustix has none either, and neither has the open crate.
+None of them compiles for AROS, so Helix does not build.
+Change: on AROS only, those Tokio features, signal-hook(-tokio), rustix
+and open are left out through target-specific dependencies. Code that
+starts programs (language servers, debug adapters, formatters, :sh, :pipe)
+uses helix_stdx::process, whose spawn reports Unsupported; debug adapters
+over TCP report the same; URLs are not opened. Signals are handled as on
+Windows (none; in raw mode Ctrl-C is a key). faccess uses std metadata.
+getrandom 0.3 gets its custom backend from libc's getentropy. Crossterm
+uses its libc backend. The editor runs on a thread with a 16 MiB stack,
+since a Shell gives commands 40 KB by default.
+Repository: helix-editor/helix
+Base: a05c151bb6e8e9c65ec390b0ae2afe7a5efd619b (tag 25.07.1)
+Author: tomaszstaniak
+Date: 2026-10-19
+Platform scope: target_os = "aros" (x86_64 ABIv11); other targets unchanged.
+Upstream status: local-only (not submitted).
+Verification: built with scripts/hx.py (rust-aros toolchain
+aros-helix-20261019); run in Limpet on AROS One 1.3, pool v11-2: opens,
+edits and saves files, quits to a working Shell.
+Removal: when Tokio (mio) and rustix gain AROS backends.
+---
+ helix-dap/Cargo.toml          |   8 +-
+ helix-dap/src/client.rs       |  35 ++++++-
+ helix-lsp/Cargo.toml          |   8 +-
+ helix-lsp/src/client.rs       |   6 +-
+ helix-lsp/src/transport.rs    |   6 +-
+ helix-stdx/Cargo.toml         |  10 +-
+ helix-stdx/src/aros_random.rs |  23 ++++
+ helix-stdx/src/faccess.rs     |  33 +++++-
+ helix-stdx/src/lib.rs         |   5 +
+ helix-stdx/src/process.rs     | 191 ++++++++++++++++++++++++++++++++++
+ helix-term/Cargo.toml         |  22 +++-
+ helix-term/src/application.rs |  18 ++--
+ helix-term/src/commands.rs    |   7 +-
+ helix-term/src/lib.rs         |  15 +++
+ helix-term/src/main.rs        |  23 ++++
+ helix-view/Cargo.toml         |  11 +-
+ helix-view/src/document.rs    |   4 +
+ 17 files changed, 403 insertions(+), 22 deletions(-)
+ create mode 100644 helix-stdx/src/aros_random.rs
+ create mode 100644 helix-stdx/src/process.rs
+
+diff --git a/helix-dap/Cargo.toml b/helix-dap/Cargo.toml
+index 8033c75776dea3e625aff1f82e3f31f8557d8141..3e7c203c42e1a68ebade3044f0c6566e127a7af4 100644
+--- a/helix-dap/Cargo.toml
++++ b/helix-dap/Cargo.toml
+@@ -20,7 +20,7 @@ anyhow = "1.0"
+ log = "0.4"
+ serde = { version = "1.0", features = ["derive"] }
+ serde_json = "1.0"
+-tokio = { version = "1", features = ["rt", "rt-multi-thread", "io-util", "io-std", "time", "process", "macros", "fs", "parking_lot", "net", "sync"] }
++tokio = { version = "1", features = ["rt", "rt-multi-thread", "io-util", "io-std", "time", "macros", "fs", "parking_lot", "sync"] }
+ thiserror.workspace = true
+ slotmap.workspace = true
+ futures-executor.workspace = true
+@@ -30,3 +30,9 @@ tokio-stream.workspace = true
+ 
+ [dev-dependencies]
+ fern = "0.7"
++
++[target.'cfg(not(target_os = "aros"))'.dependencies]
++# AROS: Tokio's process, net and signal support need mio, which has no AROS
++# backend. Those features stay on every other platform; on AROS the code
++# that uses them goes through helix_stdx::process or reports Unsupported.
++tokio = { version = "1", features = ["process", "net"] }
+diff --git a/helix-dap/src/client.rs b/helix-dap/src/client.rs
+index e5824a7fd2e2dd7b790b595d4509fd8b45e48f10..a7feee92c09820c86872bb084d26c21d40f5c472 100644
+--- a/helix-dap/src/client.rs
++++ b/helix-dap/src/client.rs
+@@ -18,14 +18,26 @@
+     process::Stdio,
+     sync::atomic::{AtomicU64, Ordering},
+ };
++#[cfg(target_os = "aros")]
++// AROS: Tokio has no process support there; see helix_stdx::process.
++use helix_stdx::process::{Child, Command};
++#[cfg(not(target_os = "aros"))]
+ use tokio::{
+-    io::{AsyncBufRead, AsyncWrite, BufReader, BufWriter},
+     net::TcpStream,
+     process::{Child, Command},
++};
++use tokio::{
++    io::{AsyncBufRead, AsyncWrite, BufReader, BufWriter},
+     sync::mpsc::{channel, unbounded_channel, UnboundedReceiver, UnboundedSender},
+     time,
+ };
+ 
++#[cfg(target_os = "aros")]
++fn no_tcp() -> Error {
++    // Tokio's networking needs mio, which has no AROS backend.
++    Error::Other(anyhow!("debug adapters over TCP are not supported on AROS"))
++}
++
+ #[derive(Debug)]
+ pub struct Client {
+     id: DebugAdapterId,
+@@ -100,6 +112,15 @@ pub fn streams(
+         Ok((client, client_rx))
+     }
+ 
++    #[cfg(target_os = "aros")]
++    pub async fn tcp(
++        _addr: std::net::SocketAddr,
++        _id: DebugAdapterId,
++    ) -> Result<(Self, UnboundedReceiver<(DebugAdapterId, Payload)>)> {
++        Err(no_tcp())
++    }
++
++    #[cfg(not(target_os = "aros"))]
+     pub async fn tcp(
+         addr: std::net::SocketAddr,
+         id: DebugAdapterId,
+@@ -142,6 +163,7 @@ pub fn stdio(
+         )
+     }
+ 
++    #[cfg(not(target_os = "aros"))]
+     async fn get_port() -> Option<u16> {
+         Some(
+             tokio::net::TcpListener::bind(SocketAddr::new(
+@@ -160,6 +182,17 @@ pub fn starting_request_args(&self) -> Option<&Value> {
+         self.starting_request_args.as_ref()
+     }
+ 
++    #[cfg(target_os = "aros")]
++    pub async fn tcp_process(
++        _cmd: &str,
++        _args: Vec<&str>,
++        _port_format: &str,
++        _id: DebugAdapterId,
++    ) -> Result<(Self, UnboundedReceiver<(DebugAdapterId, Payload)>)> {
++        Err(no_tcp())
++    }
++
++    #[cfg(not(target_os = "aros"))]
+     pub async fn tcp_process(
+         cmd: &str,
+         args: Vec<&str>,
+diff --git a/helix-lsp/Cargo.toml b/helix-lsp/Cargo.toml
+index 1968cbd2b19593937ce242d8f9db9a62445c9be2..8abe59ec1b2ee5105b862968eaca2f869a7e0a76 100644
+--- a/helix-lsp/Cargo.toml
++++ b/helix-lsp/Cargo.toml
+@@ -25,9 +25,15 @@ globset = "0.4.16"
+ log = "0.4"
+ serde = { version = "1.0", features = ["derive"] }
+ serde_json = "1.0"
+-tokio = { version = "1.46", features = ["rt", "rt-multi-thread", "io-util", "io-std", "time", "process", "macros", "fs", "parking_lot", "sync"] }
++tokio = { version = "1.46", features = ["rt", "rt-multi-thread", "io-util", "io-std", "time", "macros", "fs", "parking_lot", "sync"] }
+ tokio-stream.workspace = true
+ parking_lot.workspace = true
+ arc-swap = "1"
+ slotmap.workspace = true
+ thiserror.workspace = true
++
++[target.'cfg(not(target_os = "aros"))'.dependencies]
++# AROS: Tokio's process, net and signal support need mio, which has no AROS
++# backend. Those features stay on every other platform; on AROS the code
++# that uses them goes through helix_stdx::process or reports Unsupported.
++tokio = { version = "1.46", features = ["process"] }
+diff --git a/helix-lsp/src/client.rs b/helix-lsp/src/client.rs
+index afb3b3a56aaf099720d123c7184555f8b56185dc..6f301fcbd6578b89cf823ee1fa0c9b27658ec644 100644
+--- a/helix-lsp/src/client.rs
++++ b/helix-lsp/src/client.rs
+@@ -26,9 +26,13 @@
+ };
+ use std::{future::Future, sync::OnceLock};
+ use std::{path::Path, process::Stdio};
++#[cfg(target_os = "aros")]
++// AROS: Tokio has no process support there; see helix_stdx::process.
++use helix_stdx::process::{Child, Command};
++#[cfg(not(target_os = "aros"))]
++use tokio::process::{Child, Command};
+ use tokio::{
+     io::{BufReader, BufWriter},
+-    process::{Child, Command},
+     sync::{
+         mpsc::{channel, UnboundedReceiver, UnboundedSender},
+         Notify, OnceCell,
+diff --git a/helix-lsp/src/transport.rs b/helix-lsp/src/transport.rs
+index 088c617b797c0085fb767579da01becbc0cdd57e..247fe8ba3e34581d4a22555635fa33632ed9becd 100644
+--- a/helix-lsp/src/transport.rs
++++ b/helix-lsp/src/transport.rs
+@@ -9,9 +9,13 @@
+ use serde_json::Value;
+ use std::collections::HashMap;
+ use std::sync::Arc;
++#[cfg(target_os = "aros")]
++// AROS: Tokio has no process support there; see helix_stdx::process.
++use helix_stdx::process::{ChildStderr, ChildStdin, ChildStdout};
++#[cfg(not(target_os = "aros"))]
++use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
+ use tokio::{
+     io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter},
+-    process::{ChildStderr, ChildStdin, ChildStdout},
+     sync::{
+         mpsc::{unbounded_channel, Sender, UnboundedReceiver, UnboundedSender},
+         Mutex, Notify,
+diff --git a/helix-stdx/Cargo.toml b/helix-stdx/Cargo.toml
+index cf0dc03fe97045ef7e0d3e836502c2629c4db0f5..9672c5a31dd0babe9536e59a9cb465cdd716c552 100644
+--- a/helix-stdx/Cargo.toml
++++ b/helix-stdx/Cargo.toml
+@@ -25,8 +25,16 @@ unicode-segmentation.workspace = true
+ [target.'cfg(windows)'.dependencies]
+ windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
+ 
+-[target.'cfg(unix)'.dependencies]
++# AROS: rustix has no backend there; faccess uses std on AROS.
++[target.'cfg(all(unix, not(target_os = "aros")))'.dependencies]
+ rustix = { version = "1.0", features = ["fs"] }
+ 
++# AROS: async child processes for the code that uses tokio::process elsewhere.
++[target.'cfg(target_os = "aros")'.dependencies]
++tokio = { version = "1", features = ["io-util"] }
++# The custom getrandom backend for AROS (src/aros_random.rs).
++getrandom = { version = "0.3", default-features = false }
++libc = "0.2"
++
+ [dev-dependencies]
+ tempfile.workspace = true
+diff --git a/helix-stdx/src/aros_random.rs b/helix-stdx/src/aros_random.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..52ef853f79716aca5f270307d272b69d5bf6cbac
+--- /dev/null
++++ b/helix-stdx/src/aros_random.rs
+@@ -0,0 +1,23 @@
++//! getrandom 0.3 has no AROS backend. AROS builds select its custom backend
++//! (`--cfg getrandom_backend="custom"`), and this supplies it from libc's
++//! getentropy, which rust-aros backs with jitterentropy. tempfile uses it to
++//! choose names. Exported exactly once per program, from here.
++
++/// # Safety
++/// Called only by getrandom, with a writable buffer of `len` bytes.
++#[no_mangle]
++unsafe fn __getrandom_v03_custom(dest: *mut u8, len: usize) -> Result<(), getrandom::Error> {
++    // getentropy takes at most 256 bytes at a time. The buffer may be
++    // uninitialized, so it is only ever written through the raw pointer.
++    let mut offset = 0;
++    while offset < len {
++        let chunk_len = (len - offset).min(256);
++        let chunk = unsafe { dest.add(offset) };
++        if unsafe { libc::getentropy(chunk.cast(), chunk_len) } != 0 {
++            unsafe { core::ptr::write_bytes(dest, 0, len) };
++            return Err(getrandom::Error::new_custom(1));
++        }
++        offset += chunk_len;
++    }
++    Ok(())
++}
+diff --git a/helix-stdx/src/faccess.rs b/helix-stdx/src/faccess.rs
+index a69ad3f4d78d91861d9cbf8fd2d7c8b86b1c56a4..b651debb2065d2b42f50e637eb4b8e02dd65e997 100644
+--- a/helix-stdx/src/faccess.rs
++++ b/helix-stdx/src/faccess.rs
+@@ -21,7 +21,38 @@ pub struct AccessMode: u8 {
+     }
+ }
+ 
+-#[cfg(unix)]
++// AROS: rustix has no backend there. The C library maps the AmigaDOS
++// protection bits to st_mode, and there are no file owners to preserve.
++#[cfg(target_os = "aros")]
++mod imp {
++    use super::*;
++
++    use std::os::unix::fs::PermissionsExt;
++
++    pub fn access(p: &Path, mode: AccessMode) -> io::Result<()> {
++        let metadata = std::fs::metadata(p)?;
++        let bits = metadata.permissions().mode();
++        let denied = (mode.contains(AccessMode::READ) && bits & 0o444 == 0)
++            || (mode.contains(AccessMode::WRITE) && bits & 0o222 == 0)
++            || (mode.contains(AccessMode::EXECUTE) && bits & 0o111 == 0);
++        if denied {
++            return Err(io::Error::from(io::ErrorKind::PermissionDenied));
++        }
++        Ok(())
++    }
++
++    pub fn copy_metadata(from: &Path, to: &Path) -> io::Result<()> {
++        let permissions = std::fs::metadata(from)?.permissions();
++        std::fs::set_permissions(to, permissions)
++    }
++
++    pub fn hardlink_count(p: &Path) -> std::io::Result<u64> {
++        use std::os::unix::fs::MetadataExt;
++        Ok(p.metadata()?.nlink())
++    }
++}
++
++#[cfg(all(unix, not(target_os = "aros")))]
+ mod imp {
+     use super::*;
+ 
+diff --git a/helix-stdx/src/lib.rs b/helix-stdx/src/lib.rs
+index e371f3920b2cb848e92c8c8e1c0e9aad2079f9d9..e4d32edc84cd5fc5d0c3dc16553ee63f189277a1 100644
+--- a/helix-stdx/src/lib.rs
++++ b/helix-stdx/src/lib.rs
+@@ -4,6 +4,11 @@
+ pub mod env;
+ pub mod faccess;
+ pub mod path;
++#[cfg(target_os = "aros")]
++pub mod process;
++
++#[cfg(target_os = "aros")]
++mod aros_random;
+ pub mod range;
+ pub mod rope;
+ 
+diff --git a/helix-stdx/src/process.rs b/helix-stdx/src/process.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..d25be832319b5ec04c2ab13611a6d7bc89821327
+--- /dev/null
++++ b/helix-stdx/src/process.rs
+@@ -0,0 +1,191 @@
++//! Async child processes on AROS.
++//!
++//! Tokio's `process` module needs mio, which has no AROS backend. This module
++//! offers the part of its API that Helix uses, so language servers, debug
++//! adapters, formatters, `:sh`, `:pipe` and URL openers compile unchanged;
++//! starting a program reports `Unsupported` until a thread-backed
++//! implementation replaces it. A child can therefore never exist, and the
++//! types that would belong to one are uninhabited.
++use std::{
++    ffi::OsStr,
++    fmt, io,
++    path::Path,
++    pin::Pin,
++    process::{ExitStatus, Output, Stdio},
++    task::{Context, Poll},
++};
++
++use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
++
++fn unsupported() -> io::Error {
++    io::Error::new(
++        io::ErrorKind::Unsupported,
++        "starting programs from Helix is not supported on AROS yet",
++    )
++}
++
++#[derive(Clone, Copy)]
++enum Never {}
++
++/// The subset of `tokio::process::Command` that Helix uses.
++#[derive(Debug)]
++pub struct Command {
++    inner: std::process::Command,
++}
++
++impl Command {
++    pub fn new<S: AsRef<OsStr>>(program: S) -> Command {
++        Command {
++            inner: std::process::Command::new(program),
++        }
++    }
++
++    pub fn arg<S: AsRef<OsStr>>(&mut self, arg: S) -> &mut Command {
++        self.inner.arg(arg);
++        self
++    }
++
++    pub fn args<I, S>(&mut self, args: I) -> &mut Command
++    where
++        I: IntoIterator<Item = S>,
++        S: AsRef<OsStr>,
++    {
++        self.inner.args(args);
++        self
++    }
++
++    pub fn env<K: AsRef<OsStr>, V: AsRef<OsStr>>(&mut self, key: K, value: V) -> &mut Command {
++        self.inner.env(key, value);
++        self
++    }
++
++    pub fn envs<I, K, V>(&mut self, vars: I) -> &mut Command
++    where
++        I: IntoIterator<Item = (K, V)>,
++        K: AsRef<OsStr>,
++        V: AsRef<OsStr>,
++    {
++        self.inner.envs(vars);
++        self
++    }
++
++    pub fn current_dir<P: AsRef<Path>>(&mut self, dir: P) -> &mut Command {
++        self.inner.current_dir(dir);
++        self
++    }
++
++    pub fn stdin<T: Into<Stdio>>(&mut self, cfg: T) -> &mut Command {
++        self.inner.stdin(cfg);
++        self
++    }
++
++    pub fn stdout<T: Into<Stdio>>(&mut self, cfg: T) -> &mut Command {
++        self.inner.stdout(cfg);
++        self
++    }
++
++    pub fn stderr<T: Into<Stdio>>(&mut self, cfg: T) -> &mut Command {
++        self.inner.stderr(cfg);
++        self
++    }
++
++    pub fn kill_on_drop(&mut self, _kill_on_drop: bool) -> &mut Command {
++        self
++    }
++
++    pub fn spawn(&mut self) -> io::Result<Child> {
++        Err(unsupported())
++    }
++
++    pub async fn output(&mut self) -> io::Result<Output> {
++        Err(unsupported())
++    }
++}
++
++impl From<std::process::Command> for Command {
++    fn from(inner: std::process::Command) -> Command {
++        Command { inner }
++    }
++}
++
++/// A running child process. None can be started on AROS yet.
++pub struct Child {
++    pub stdin: Option<ChildStdin>,
++    pub stdout: Option<ChildStdout>,
++    pub stderr: Option<ChildStderr>,
++    never: Never,
++}
++
++impl fmt::Debug for Child {
++    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self.never {}
++    }
++}
++
++impl Child {
++    pub fn id(&self) -> Option<u32> {
++        match self.never {}
++    }
++
++    pub fn start_kill(&mut self) -> io::Result<()> {
++        match self.never {}
++    }
++
++    pub async fn kill(&mut self) -> io::Result<()> {
++        match self.never {}
++    }
++
++    pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
++        match self.never {}
++    }
++
++    pub async fn wait(&mut self) -> io::Result<ExitStatus> {
++        match self.never {}
++    }
++
++    pub async fn wait_with_output(self) -> io::Result<Output> {
++        match self.never {}
++    }
++}
++
++macro_rules! pipe_end {
++    ($name:ident) => {
++        pub struct $name(Never);
++
++        impl fmt::Debug for $name {
++            fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
++                match self.0 {}
++            }
++        }
++    };
++}
++
++pipe_end!(ChildStdin);
++pipe_end!(ChildStdout);
++pipe_end!(ChildStderr);
++
++impl AsyncWrite for ChildStdin {
++    fn poll_write(self: Pin<&mut Self>, _: &mut Context<'_>, _: &[u8]) -> Poll<io::Result<usize>> {
++        match self.0 {}
++    }
++
++    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
++        match self.0 {}
++    }
++
++    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
++        match self.0 {}
++    }
++}
++
++impl AsyncRead for ChildStdout {
++    fn poll_read(self: Pin<&mut Self>, _: &mut Context<'_>, _: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
++        match self.0 {}
++    }
++}
++
++impl AsyncRead for ChildStderr {
++    fn poll_read(self: Pin<&mut Self>, _: &mut Context<'_>, _: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
++        match self.0 {}
++    }
++}
+diff --git a/helix-term/Cargo.toml b/helix-term/Cargo.toml
+index 5e4367f00ec5e4e0e120267530c0eb0f474cb354..689e4ff6407bb1eaaf31b5872bffc8e177fe0f5d 100644
+--- a/helix-term/Cargo.toml
++++ b/helix-term/Cargo.toml
+@@ -53,10 +53,9 @@ helix-loader = { path = "../helix-loader" }
+ anyhow = "1"
+ once_cell = "1.21"
+ 
+-tokio = { version = "1", features = ["rt", "rt-multi-thread", "io-util", "io-std", "time", "process", "macros", "fs", "parking_lot"] }
++tokio = { version = "1", features = ["rt", "rt-multi-thread", "io-util", "io-std", "time", "macros", "fs", "parking_lot"] }
+ tui = { path = "../helix-tui", package = "helix-tui", default-features = false, features = ["crossterm"] }
+ crossterm = { version = "0.28", features = ["event-stream"] }
+-signal-hook = "0.3"
+ tokio-stream = "0.1"
+ futures-util = { version = "0.3", features = ["std", "async-await"], default-features = false }
+ arc-swap = { version = "1.7.1" }
+@@ -77,8 +76,6 @@ pulldown-cmark = { version = "0.13", default-features = false }
+ content_inspector = "0.2.4"
+ thiserror.workspace = true
+ 
+-# opening URLs
+-open = "5.3.2"
+ url = "2.5.4"
+ 
+ # config
+@@ -91,10 +88,25 @@ serde = { version = "1.0", features = ["derive"] }
+ grep-regex = "0.1.13"
+ grep-searcher = "0.1.14"
+ 
+-[target.'cfg(not(windows))'.dependencies]  # https://github.com/vorner/signal-hook/issues/100
++[target.'cfg(not(target_os = "aros"))'.dependencies]
++# AROS: Tokio's process, net and signal support need mio, which has no AROS
++# backend. Those features stay on every other platform; on AROS the code
++# that uses them goes through helix_stdx::process or reports Unsupported.
++tokio = { version = "1", features = ["process"] }
++signal-hook = "0.3"
++# opening URLs
++open = "5.3.2"
++
++[target.'cfg(not(any(windows, target_os = "aros")))'.dependencies]  # https://github.com/vorner/signal-hook/issues/100
+ signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
++
++[target.'cfg(not(windows))'.dependencies]
+ libc = "0.2.174"
+ 
++# AROS: the libc backend avoids rustix, which has no AROS backend either.
++[target.'cfg(target_os = "aros")'.dependencies]
++crossterm = { version = "0.28", features = ["event-stream", "libc"] }
++
+ [target.'cfg(target_os = "macos")'.dependencies]
+ crossterm = { version = "0.28", features = ["event-stream", "use-dev-tty", "libc"] }
+ 
+diff --git a/helix-term/src/application.rs b/helix-term/src/application.rs
+index cf09aac0df4b9fa391edf53f5b0e42f80bf5f3f8..40faf2fb61a8cb31cf0f15dabf4e10689016f9a2 100644
+--- a/helix-term/src/application.rs
++++ b/helix-term/src/application.rs
+@@ -34,14 +34,16 @@
+ use std::io::stdout;
+ use std::{io::stdin, path::Path, sync::Arc};
+ 
+-#[cfg(not(windows))]
++#[cfg(not(any(windows, target_os = "aros")))]
+ use anyhow::Context;
+ use anyhow::Error;
+ 
+ use crossterm::{event::Event as CrosstermEvent, tty::IsTty};
+-#[cfg(not(windows))]
++#[cfg(not(any(windows, target_os = "aros")))]
+ use {signal_hook::consts::signal, signal_hook_tokio::Signals};
+-#[cfg(windows)]
++// AROS has no POSIX signals to watch: in raw mode Ctrl-C arrives as a key,
++// and there is no job control or terminal hang-up.
++#[cfg(any(windows, target_os = "aros"))]
+ type Signals = futures_util::stream::Empty<()>;
+ 
+ #[cfg(not(feature = "integration"))]
+@@ -222,9 +224,9 @@ pub fn new(args: Args, config: Config, lang_loader: syntax::Loader) -> Result<Se
+                 .unwrap_or_else(|_| editor.new_file(Action::VerticalSplit));
+         }
+ 
+-        #[cfg(windows)]
++        #[cfg(any(windows, target_os = "aros"))]
+         let signals = futures_util::stream::empty();
+-        #[cfg(not(windows))]
++        #[cfg(not(any(windows, target_os = "aros")))]
+         let signals = Signals::new([
+             signal::SIGTSTP,
+             signal::SIGCONT,
+@@ -460,13 +462,13 @@ fn load_configured_theme(editor: &mut Editor, config: &Config) {
+         editor.set_theme(theme);
+     }
+ 
+-    #[cfg(windows)]
+-    // no signal handling available on windows
++    #[cfg(any(windows, target_os = "aros"))]
++    // no signal handling available on windows or AROS
+     pub async fn handle_signals(&mut self, _signal: ()) -> bool {
+         true
+     }
+ 
+-    #[cfg(not(windows))]
++    #[cfg(not(any(windows, target_os = "aros")))]
+     pub async fn handle_signals(&mut self, signal: i32) -> bool {
+         match signal {
+             signal::SIGTSTP => {
+diff --git a/helix-term/src/commands.rs b/helix-term/src/commands.rs
+index 304dcd8840cf6437d64ccd458330c1909f79170f..1d3ef08c70b20050a6fb6878281aae00635f1a56 100644
+--- a/helix-term/src/commands.rs
++++ b/helix-term/src/commands.rs
+@@ -6239,7 +6239,11 @@ async fn shell_impl_async(
+     cmd: &str,
+     input: Option<Rope>,
+ ) -> anyhow::Result<Tendril> {
++    #[cfg(target_os = "aros")]
++    // AROS: Tokio has no process support there; see helix_stdx::process.
++    use helix_stdx::process::Command;
+     use std::process::Stdio;
++    #[cfg(not(target_os = "aros"))]
+     use tokio::process::Command;
+     ensure!(!shell.is_empty(), "No shell set");
+ 
+@@ -6402,7 +6406,8 @@ fn shell_prompt(cx: &mut Context, prompt: Cow<'static, str>, behavior: ShellBeha
+ }
+ 
+ fn suspend(_cx: &mut Context) {
+-    #[cfg(not(windows))]
++    // AROS has no job control; as on Windows, suspend does nothing.
++    #[cfg(not(any(windows, target_os = "aros")))]
+     {
+         _cx.block_try_flush_writes().ok();
+         signal_hook::low_level::raise(signal_hook::consts::signal::SIGTSTP).unwrap();
+diff --git a/helix-term/src/lib.rs b/helix-term/src/lib.rs
+index 75b67479b411f7a27383a6a3c236534c48916c03..dd4865eed3ca4277911dddf99801b26733971e90 100644
+--- a/helix-term/src/lib.rs
++++ b/helix-term/src/lib.rs
+@@ -70,6 +70,21 @@ fn filter_picker_entry(entry: &DirEntry, root: &Path, dedup_symlinks: bool) -> b
+ }
+ 
+ /// Opens URL in external program.
++#[cfg(target_os = "aros")]
++fn open_external_url_callback(
++    _url: Url,
++) -> impl Future<Output = Result<job::Callback, anyhow::Error>> + Send + 'static {
++    // AROS: the `open` crate knows no AROS opener, and Helix cannot start
++    // programs there yet (see helix_stdx::process).
++    async {
++        Ok(job::Callback::Editor(Box::new(move |editor| {
++            editor.set_error("Opening URLs in external programs is not supported on AROS")
++        })))
++    }
++}
++
++/// Opens URL in external program.
++#[cfg(not(target_os = "aros"))]
+ fn open_external_url_callback(
+     url: Url,
+ ) -> impl Future<Output = Result<job::Callback, anyhow::Error>> + Send + 'static {
+diff --git a/helix-term/src/main.rs b/helix-term/src/main.rs
+index 31ab85cff84ff78d15d6de50070625fe1658a7dc..5e4f489c1ffa0a58cd03615fd7f527cce6996743 100644
+--- a/helix-term/src/main.rs
++++ b/helix-term/src/main.rs
+@@ -33,11 +33,34 @@ fn setup_logging(verbosity: u64) -> Result<()> {
+     Ok(())
+ }
+ 
++#[cfg(not(target_os = "aros"))]
+ fn main() -> Result<()> {
+     let exit_code = main_impl()?;
+     std::process::exit(exit_code);
+ }
+ 
++/// The editor's own stack on AROS. A Shell gives its commands 40 KB by
++/// default on AROS One, far too little for the editor's async state, and
++/// the process stack cannot grow; the editor runs on a thread of its own.
++#[cfg(target_os = "aros")]
++const EDITOR_STACK: usize = 16 * 1024 * 1024;
++
++#[cfg(target_os = "aros")]
++fn main() -> Result<()> {
++    let editor = std::thread::Builder::new()
++        .name("helix".into())
++        .stack_size(EDITOR_STACK)
++        .spawn(main_impl)
++        .context("could not start the editor thread")?;
++    // The runtime has shut down when main_impl returns, so its threads have
++    // ended before the process does.
++    let exit_code = match editor.join() {
++        Ok(result) => result?,
++        Err(panic) => std::panic::resume_unwind(panic),
++    };
++    std::process::exit(exit_code);
++}
++
+ #[tokio::main]
+ async fn main_impl() -> Result<i32> {
+     let args = Args::parse_args().context("could not parse arguments")?;
+diff --git a/helix-view/Cargo.toml b/helix-view/Cargo.toml
+index bcee1a0a7a71eb22c73c10b403dda3da698194dd..318546349fc9ff018222d2993e166a842b4f477d 100644
+--- a/helix-view/Cargo.toml
++++ b/helix-view/Cargo.toml
+@@ -36,7 +36,7 @@ url = "2.5.4"
+ 
+ arc-swap = { version = "1.7.1" }
+ 
+-tokio = { version = "1", features = ["rt", "rt-multi-thread", "io-util", "io-std", "time", "process", "macros", "fs", "parking_lot"] }
++tokio = { version = "1", features = ["rt", "rt-multi-thread", "io-util", "io-std", "time", "macros", "fs", "parking_lot"] }
+ tokio-stream = "0.1"
+ futures-util = { version = "0.3", features = ["std", "async-await"], default-features = false }
+ 
+@@ -57,6 +57,15 @@ clipboard-win = { version = "5.4", features = ["std"] }
+ 
+ [target.'cfg(unix)'.dependencies]
+ libc = "0.2"
++
++[target.'cfg(not(target_os = "aros"))'.dependencies]
++# AROS: Tokio's process, net and signal support need mio, which has no AROS
++# backend. Those features stay on every other platform; on AROS the code
++# that uses them goes through helix_stdx::process or reports Unsupported.
++tokio = { version = "1", features = ["process"] }
++
++# AROS: rustix has no backend there; nothing in helix-view needs it.
++[target.'cfg(all(unix, not(target_os = "aros")))'.dependencies]
+ rustix = { version = "1.0", features = ["fs"] }
+ 
+ [dev-dependencies]
+diff --git a/helix-view/src/document.rs b/helix-view/src/document.rs
+index 2fff23471d913c7dee0b657fb44519a4991c7f06..e1dc035da2e9ff921848ed0ca56cee96bdd4a354 100644
+--- a/helix-view/src/document.rs
++++ b/helix-view/src/document.rs
+@@ -828,6 +828,10 @@ pub fn format(
+             use std::process::Stdio;
+             let text = self.text().clone();
+ 
++            #[cfg(target_os = "aros")]
++            // AROS: Tokio has no process support there; see helix_stdx::process.
++            let mut process = helix_stdx::process::Command::new(&fmt_cmd);
++            #[cfg(not(target_os = "aros"))]
+             let mut process = tokio::process::Command::new(&fmt_cmd);
+ 
+             if let Some(doc_dir) = self.path.as_ref().and_then(|path| path.parent()) {

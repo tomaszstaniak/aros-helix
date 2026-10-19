@@ -1,0 +1,32 @@
+Origin: PdfCraft AROS port, 2026-10-18, against aros_src5376f09 after patch0001.
+Problem: detached completion clears ThreadInfo while StarterFunc still runs with
+  scheduling enabled. __pthread_Exit_Func can observe the empty slot and return;
+  unloading the executable then leaves the detached task in freed code. A live
+  detached pthread at GUI shutdown led to an isolated, native RED regression.
+Change: after obtaining thread_sem, forbid scheduling before publishing the empty
+  slot; retain Forbid through the final return, matching the joinable path. No
+  wait is added inside the protected epilogue. The semaphore acquisition remains
+  outside Forbid, so a contended acquisition does not publish completion early.
+Scope: private x86_64 older-v11 pthread_create.o. Shared SDK and Rust unchanged.
+Verification: tests/pthread-exit widens the actual post-cleanup tail with a pure
+  busy loop. Before this patch, exit returned with tail_done=0 (native rc20).
+  The probe keeps its executable loaded afterwards to avoid deliberately crashing.
+Upstream-status: not submitted. Mainline c31d3294 has its own changed completion/
+  join/exit protocol and a final Forbid; assess separately, do not stack blindly.
+User-report: post-exit desktop crash/freeze on aros.games v11 x86_64; direct GUI
+  reproduction on older AROS One was negative. This race fix is not proof that
+  every reported desktop failure is resolved.
+---
+--- a/compiler/pthread/pthread_create.c
++++ b/compiler/pthread/pthread_create.c
+@@ -146,6 +146,10 @@
+         Permit();
+         // no one is waiting for us, do the clean up
+         ObtainSemaphore(&thread_sem);
++        // Clearing the slot lets the exit handler unload this executable.
++        // Keep scheduling disabled until this task has left its code, as
++        // the joinable path above already does. ReleaseSemaphore cannot wait.
++        Forbid();
+         memset(inf, 0, sizeof(ThreadInfo));
+         ReleaseSemaphore(&thread_sem);
+     }

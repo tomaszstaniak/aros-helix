@@ -1,0 +1,114 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 02:40:23 +0200
+Subject: [PATCH] AROS: named temporary files without rustix
+
+Repository: crates.io tempfile 3.20.0 (archive SHA-256 e8a64e39...d6a1)
+Author: tomaszstaniak
+Date: 2026-10-19
+Platform scope: target_os = "aros"; other targets unchanged.
+Upstream status: local-only (not submitted).
+Problem: tempfile's Unix implementation uses rustix, which has no AROS
+backend.
+Change: the PdfCraft port's adapter (aros-artcraft pdfcraft,
+patches/crates/tempfile-3.27.0) applied to 3.20.0: exclusive std opens for
+named files; unnamed files and overwriting persist are refused.
+Verification: Helix's save makes its backup with Builder::make_in and
+keep; saving files on AROS One 1.3 (RAM:) works.
+Removal: when rustix gains an AROS backend.
+---
+ Cargo.toml           |  2 +-
+ src/dir/imp/mod.rs   |  8 ++++----
+ src/file/imp/aros.rs | 40 ++++++++++++++++++++++++++++++++++++++++
+ src/file/imp/mod.rs  |  3 ++-
+ 4 files changed, 47 insertions(+), 6 deletions(-)
+ create mode 100644 src/file/imp/aros.rs
+
+diff --git a/Cargo.toml b/Cargo.toml
+index a49159c3b6b36026498f394d20908f7daeeefabd..0c9d72c5a75a1a41906de1ee688723ade0eb4306 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -81,7 +81,7 @@ default-features = false
+ [dev-dependencies.doc-comment]
+ version = "0.3"
+ 
+-[target.'cfg(any(unix, target_os = "wasi"))'.dependencies.rustix]
++[target.'cfg(any(all(unix, not(target_os = "aros")), target_os = "wasi"))'.dependencies.rustix]
+ version = "1.0.0"
+ features = ["fs"]
+ 
+diff --git a/src/dir/imp/mod.rs b/src/dir/imp/mod.rs
+index 26d0a227387e2553000b3562417b43f91ebb7cf2..45e6733145c49e0aacb6017cd17350a73f99c9d8 100644
+--- a/src/dir/imp/mod.rs
++++ b/src/dir/imp/mod.rs
+@@ -1,9 +1,9 @@
+-#[cfg(unix)]
++#[cfg(all(unix, not(target_os = "aros")))]
+ mod unix;
+-#[cfg(unix)]
++#[cfg(all(unix, not(target_os = "aros")))]
+ pub use unix::*;
+ 
+-#[cfg(not(unix))]
++#[cfg(any(not(unix), target_os = "aros"))]
+ mod any;
+-#[cfg(not(unix))]
++#[cfg(any(not(unix), target_os = "aros"))]
+ pub use any::*;
+diff --git a/src/file/imp/aros.rs b/src/file/imp/aros.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..10d20aeeea18080ede370444a1729d99f4e3edc2
+--- /dev/null
++++ b/src/file/imp/aros.rs
+@@ -0,0 +1,40 @@
++use std::fs::{self, File, OpenOptions};
++use std::io;
++use std::path::Path;
++use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
++
++pub fn create_named(path: &Path, options: &mut OpenOptions, permissions: Option<&fs::Permissions>) -> io::Result<File> {
++    options.read(true).write(true).create_new(true)
++        .mode(permissions.map_or(0o600, PermissionsExt::mode)).open(path)
++}
++
++pub fn create(_dir: &Path) -> io::Result<File> {
++    Err(io::Error::new(io::ErrorKind::Unsupported, "unnamed temporary files are not accepted by this AROS adapter"))
++}
++
++pub fn reopen(file: &File, path: &Path) -> io::Result<File> {
++    use std::os::unix::fs::MetadataExt;
++    let reopened = OpenOptions::new().read(true).write(true).open(path)?;
++    let old = file.metadata()?;
++    let new = reopened.metadata()?;
++    if (old.dev(), old.ino()) != (new.dev(), new.ino()) {
++        return Err(io::Error::new(io::ErrorKind::NotFound, "temporary path was replaced"));
++    }
++    Ok(reopened)
++}
++
++pub fn persist(old: &Path, new: &Path, overwrite: bool) -> io::Result<()> {
++    if overwrite {
++        // The selected CRT can delete the destination before a failed rename.
++        // No accepted overwrite transaction is available in this adapter yet.
++        Err(io::Error::new(io::ErrorKind::Unsupported, "temporary-file overwrite is not accepted on AROS"))
++    } else {
++        // No check-then-rename: hard_link must atomically reject an occupied target.
++        // If this SDK/filesystem refuses links, preserve the temporary file and fail.
++        fs::hard_link(old, new)?;
++        let _ = fs::remove_file(old);
++        Ok(())
++    }
++}
++
++pub fn keep(_path: &Path) -> io::Result<()> { Ok(()) }
+diff --git a/src/file/imp/mod.rs b/src/file/imp/mod.rs
+index 8a00f201ecb15504fc2e78bc04e8320047616278..cef3b0762a519d06ce97611ea111f60437feaa3e 100644
+--- a/src/file/imp/mod.rs
++++ b/src/file/imp/mod.rs
+@@ -1,4 +1,5 @@
+-#[cfg_attr(any(unix, target_os = "redox", target_os = "wasi"), path = "unix.rs")]
++#[cfg_attr(target_os = "aros", path = "aros.rs")]
++#[cfg_attr(any(all(unix, not(target_os = "aros")), target_os = "redox", target_os = "wasi"), path = "unix.rs")]
+ #[cfg_attr(windows, path = "windows.rs")]
+ #[cfg_attr(
+     not(any(unix, target_os = "redox", target_os = "wasi", windows)),

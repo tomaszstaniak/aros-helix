@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 02:19:21 +0200
+Subject: [PATCH 5/5] AROS: tree-sitter grammars linked into the program
+
+Problem: Helix loads grammars as shared libraries; AROS cannot load ELF
+shared objects.
+Change: on AROS get_language takes the grammars linked into hx (the
+port's build compiles them; currently Rust) through
+tree_house_bindings::Grammar::from_language, a function this port adds.
+Repository: helix-editor/helix
+Base: a05c151bb6e8e9c65ec390b0ae2afe7a5efd619b (tag 25.07.1)
+Author: tomaszstaniak
+Date: 2026-10-19
+Platform scope: target_os = "aros" (x86_64 ABIv11); other targets unchanged.
+Upstream status: local-only (not submitted).
+Requires: the tree-house-bindings 0.2.1 patches of this port.
+Verification: hx --health rust shows the parser and the queries; Rust
+source is highlighted in Limpet on AROS One 1.3.
+---
+ helix-loader/src/grammar.rs | 17 ++++++++++++++++-
+ 1 file changed, 16 insertions(+), 1 deletion(-)
+
+diff --git a/helix-loader/src/grammar.rs b/helix-loader/src/grammar.rs
+index 362d3ba09cb9b6c8d94915e12a87cc923ec92fce..7f91f3f92a60cc93b5c950c83cc445c14dc8b218 100644
+--- a/helix-loader/src/grammar.rs
++++ b/helix-loader/src/grammar.rs
+@@ -65,7 +65,22 @@ pub fn get_language(name: &str) -> Result<Option<Grammar>> {
+     unimplemented!()
+ }
+ 
+-#[cfg(not(target_arch = "wasm32"))]
++/// AROS cannot load shared libraries: the grammars are linked into the
++/// program (the port's build compiles them), and this lists them.
++#[cfg(target_os = "aros")]
++pub fn get_language(name: &str) -> Result<Option<Grammar>> {
++    use std::{ffi::c_void, ptr::NonNull};
++    extern "C" {
++        fn tree_sitter_rust() -> NonNull<c_void>;
++    }
++    let language = match name {
++        "rust" => unsafe { tree_sitter_rust() },
++        _ => return Ok(None),
++    };
++    Ok(Some(unsafe { Grammar::from_language(language) }?))
++}
++
++#[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+ pub fn get_language(name: &str) -> Result<Option<Grammar>> {
+     let mut rel_library_path = PathBuf::new().join("grammars").join(name);
+     rel_library_path.set_extension(DYLIB_EXTENSION);

@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 01:28:25 +0200
+Subject: [PATCH 3/5] Return exit codes from main_impl instead of exiting there
+
+Problem: on AROS the editor runs on its own thread, and exit() from a
+thread other than the main task crashes in crt.library
+(__progonly_jmp2exit); abort() from a thread is no clean exit either.
+Change: --help, --version and --health return their exit code to main,
+which exits as before (behaviour is the same everywhere). On AROS, main
+ends with status 101 if the editor thread panicked, after the panic hook
+has restored the terminal; builds use panic=unwind for this.
+Repository: helix-editor/helix
+Base: a05c151bb6e8e9c65ec390b0ae2afe7a5efd619b (tag 25.07.1)
+Author: tomaszstaniak
+Date: 2026-10-19
+Platform scope: target_os = "aros" (x86_64 ABIv11); other targets unchanged.
+Upstream status: local-only (not submitted).
+Verification: hx --version returns 0 on AROS One 1.3 (it crashed before);
+a panic on the editor thread ends with rc 101 and a usable Shell.
+---
+ helix-term/src/main.rs | 14 +++++++++-----
+ 1 file changed, 9 insertions(+), 5 deletions(-)
+
+diff --git a/helix-term/src/main.rs b/helix-term/src/main.rs
+index 5e4f489c1ffa0a58cd03615fd7f527cce6996743..dc3de01878ae94bc9cbb8ed05eb535717d4408b6 100644
+--- a/helix-term/src/main.rs
++++ b/helix-term/src/main.rs
+@@ -53,14 +53,18 @@ fn main() -> Result<()> {
+         .spawn(main_impl)
+         .context("could not start the editor thread")?;
+     // The runtime has shut down when main_impl returns, so its threads have
+-    // ended before the process does.
++    // ended before the process does. A panic has already been reported and
++    // the terminal restored by the panic hook; end with Rust's panic status
++    // from here, since abort() from another task is not a clean exit on AROS.
+     let exit_code = match editor.join() {
+         Ok(result) => result?,
+-        Err(panic) => std::panic::resume_unwind(panic),
++        Err(_) => 101,
+     };
+     std::process::exit(exit_code);
+ }
+ 
++// Returns the exit code instead of exiting: on AROS this runs on a thread of
++// its own, and only the main task may end the process.
+ #[tokio::main]
+ async fn main_impl() -> Result<i32> {
+     let args = Args::parse_args().context("could not parse arguments")?;
+@@ -105,12 +109,12 @@ async fn main_impl() -> Result<i32> {
+             env!("CARGO_PKG_DESCRIPTION"),
+             helix_loader::default_log_file().display(),
+         );
+-        std::process::exit(0);
++        return Ok(0);
+     }
+ 
+     if args.display_version {
+         println!("helix {}", VERSION_AND_GIT_HASH);
+-        std::process::exit(0);
++        return Ok(0);
+     }
+ 
+     if args.health {
+@@ -122,7 +126,7 @@ async fn main_impl() -> Result<i32> {
+             }
+         }
+ 
+-        std::process::exit(0);
++        return Ok(0);
+     }
+ 
+     if args.fetch_grammars {

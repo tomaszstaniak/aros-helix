@@ -1,0 +1,696 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 02:40:22 +0200
+Subject: [PATCH] AROS: event source, waker and terminal queries for AROS
+ consoles
+
+Repository: crates.io crossterm 0.28.1 (archive SHA-256 829d955a...dea9c6)
+Author: tomaszstaniak
+Date: 2026-10-19
+Platform scope: target_os = "aros" (x86_64 ABIv11); other targets unchanged.
+Upstream status: local-only (not submitted).
+Problem: crossterm's Unix backends need mio, signal-hook, rustix and
+/dev/tty, none of which exist on AROS (a /dev/tty path even names a
+volume and can open a "Please insert volume" requester). AROS has no
+SIGWINCH and no select on a console.
+Change: an AROS event source. It waits with poll() on the console
+descriptor (rust-aros libc answers that with DOS WaitForChar, so an idle
+editor costs one request per 250 ms slice), turns on resize reports
+(private mode 2048, CSI 48;rows;cols;h;w t, which Limpet sends) and polls
+TIOCGWINSZ once per slice until the first report. A lone ESC waits 30 ms.
+EventStream works through a flag-based waker. The window size comes from
+the console behind stdout, else stdin; the keyboard enhancement query
+answers false at once (no AROS console answers it); no tput. Derived from
+the isolated mainline candidate in aros-xterm tools/rust-tty.
+Verification: host tests (feature aros-event-source) for the parser,
+resize reports, escape timing, EOF and waking. On AROS One 1.3 in
+Limpet 0.6.0, the experiments/term-probe of the Helix port saw size,
+resize, keys, Alt, Ctrl and Esc as sent, and left raw mode cleanly.
+Removal: when crossterm gains an AROS backend upstream.
+---
+ Cargo.toml                          |  11 +-
+ src/event/source/unix.rs            |  14 +-
+ src/event/source/unix/aros.rs       | 262 ++++++++++++++++++++++++++++
+ src/event/source/unix/aros_tests.rs | 100 +++++++++++
+ src/event/sys/unix/waker.rs         |  14 +-
+ src/event/sys/unix/waker/aros.rs    |  28 +++
+ src/terminal/sys/file_descriptor.rs |  10 +-
+ src/terminal/sys/unix.rs            |  61 +++++--
+ 8 files changed, 473 insertions(+), 27 deletions(-)
+ create mode 100644 src/event/source/unix/aros.rs
+ create mode 100644 src/event/source/unix/aros_tests.rs
+ create mode 100644 src/event/sys/unix/waker/aros.rs
+
+diff --git a/Cargo.toml b/Cargo.toml
+index 3cf9c80046b760dcab69c52fae4bea4ee442bdc3..09fe0f63a05370e5767c44d08f038134e1627ebc 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -129,6 +129,7 @@ version = "1.25"
+ features = ["full"]
+ 
+ [features]
++aros-event-source = ["libc"]
+ bracketed-paste = []
+ default = [
+     "bracketed-paste",
+@@ -157,7 +158,7 @@ windows = [
+     "dep:crossterm_winapi",
+ ]
+ 
+-[target."cfg(unix)".dependencies.filedescriptor]
++[target.'cfg(all(unix, not(target_os = "aros")))'.dependencies.filedescriptor]
+ version = "0.8"
+ optional = true
+ 
+@@ -166,12 +167,12 @@ version = "0.2"
+ optional = true
+ default-features = false
+ 
+-[target."cfg(unix)".dependencies.mio]
++[target.'cfg(all(unix, not(target_os = "aros")))'.dependencies.mio]
+ version = "1.0"
+ features = ["os-poll"]
+ optional = true
+ 
+-[target."cfg(unix)".dependencies.rustix]
++[target.'cfg(all(unix, not(target_os = "aros")))'.dependencies.rustix]
+ version = "0.38.34"
+ features = [
+     "std",
+@@ -180,11 +181,11 @@ features = [
+ ]
+ default-features = false
+ 
+-[target."cfg(unix)".dependencies.signal-hook]
++[target.'cfg(all(unix, not(target_os = "aros")))'.dependencies.signal-hook]
+ version = "0.3.17"
+ optional = true
+ 
+-[target."cfg(unix)".dependencies.signal-hook-mio]
++[target.'cfg(all(unix, not(target_os = "aros")))'.dependencies.signal-hook-mio]
+ version = "0.2.4"
+ features = ["support-v1_0"]
+ optional = true
+diff --git a/src/event/source/unix.rs b/src/event/source/unix.rs
+index 84966c1ce9a1c78f767267f6fb3012d9618a3fd9..2bbfbae4a28e4c0605570547759e31c930a61d23 100644
+--- a/src/event/source/unix.rs
++++ b/src/event/source/unix.rs
+@@ -1,11 +1,17 @@
+-#[cfg(feature = "use-dev-tty")]
++#[cfg(all(not(any(target_os = "aros", feature = "aros-event-source")), feature = "use-dev-tty"))]
+ pub(crate) mod tty;
+ 
+-#[cfg(not(feature = "use-dev-tty"))]
++#[cfg(all(not(any(target_os = "aros", feature = "aros-event-source")), not(feature = "use-dev-tty")))]
+ pub(crate) mod mio;
+ 
+-#[cfg(feature = "use-dev-tty")]
++#[cfg(any(target_os = "aros", feature = "aros-event-source"))]
++pub(crate) mod aros;
++
++#[cfg(all(not(any(target_os = "aros", feature = "aros-event-source")), feature = "use-dev-tty"))]
+ pub(crate) use self::tty::UnixInternalEventSource;
+ 
+-#[cfg(not(feature = "use-dev-tty"))]
++#[cfg(all(not(any(target_os = "aros", feature = "aros-event-source")), not(feature = "use-dev-tty")))]
+ pub(crate) use self::mio::UnixInternalEventSource;
++
++#[cfg(any(target_os = "aros", feature = "aros-event-source"))]
++pub(crate) use self::aros::UnixInternalEventSource;
+diff --git a/src/event/source/unix/aros.rs b/src/event/source/unix/aros.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..22b874c60f0aca79c9807a45442f2c79369c36fb
+--- /dev/null
++++ b/src/event/source/unix/aros.rs
+@@ -0,0 +1,262 @@
++//! Event source for AROS consoles.
++//!
++//! AROS has no select on a console and no SIGWINCH. Readiness comes from
++//! libc's poll on the one console descriptor, which waits inside the console
++//! handler (DOS WaitForChar), so an idle source costs one request per slice
++//! rather than a timer wake-up per poll.
++//!
++//! Size changes come in-band: the source turns on resize reports (private
++//! mode 2048), which Limpet answers at once and after every change with
++//! `CSI 48 ; rows ; columns ; height ; width t`. Until a first report has
++//! arrived, the size is also read with TIOCGWINSZ once per slice, so
++//! terminals without the mode still report resizes, only later.
++use std::{
++    collections::VecDeque,
++    io,
++    sync::{
++        atomic::{AtomicBool, Ordering},
++        Arc,
++    },
++    time::{Duration, Instant},
++};
++
++#[cfg(feature = "event-stream")]
++use crate::event::sys::Waker;
++use crate::event::{
++    source::EventSource, sys::unix::parse::parse_event, timeout::PollTimeout, Event,
++    InternalEvent,
++};
++use crate::terminal::sys::file_descriptor::{tty_fd, FileDesc};
++
++/// The longest wait inside one request. It bounds how late a wake-up from
++/// another thread is noticed and, without resize reports, a size change.
++const SLICE: Duration = Duration::from_millis(250);
++/// How long a lone ESC waits for the rest of a sequence. Limpet sends a
++/// key's sequence in one write; the margin is for slow emulated machines.
++const ESCAPE_WINDOW: Duration = Duration::from_millis(30);
++/// Bracketed paste arrives as one sequence; this bounds a runaway one.
++const MAX_SEQUENCE: usize = 4 * 1024 * 1024;
++const ENABLE_RESIZE_REPORTS: &[u8] = b"\x1b[?2048h";
++
++#[derive(Default)]
++struct Parser {
++    bytes: Vec<u8>,
++    events: VecDeque<InternalEvent>,
++    resize_reports: bool,
++}
++
++impl Parser {
++    fn feed(&mut self, bytes: &[u8]) -> io::Result<()> {
++        for &byte in bytes {
++            if self.bytes.len() == MAX_SEQUENCE {
++                self.bytes.clear();
++                return Err(io::Error::new(
++                    io::ErrorKind::InvalidData,
++                    "terminal input sequence too long",
++                ));
++            }
++            self.bytes.push(byte);
++            if let Some(size) = resize_report(&self.bytes) {
++                self.resize_reports = true;
++                self.events
++                    .push_back(InternalEvent::Event(Event::Resize(size.0, size.1)));
++                self.bytes.clear();
++                continue;
++            }
++            // `true`: more may follow, so a lone ESC stays pending.
++            match parse_event(&self.bytes, true) {
++                Ok(Some(event)) => {
++                    self.events.push_back(event);
++                    self.bytes.clear();
++                }
++                Ok(None) => {}
++                Err(_) => self.bytes.clear(),
++            }
++        }
++        Ok(())
++    }
++
++    fn escape_pending(&self) -> bool {
++        self.bytes == [0x1b]
++    }
++
++    fn expire_escape(&mut self) {
++        if self.escape_pending() {
++            if let Ok(Some(event)) = parse_event(&self.bytes, false) {
++                self.events.push_back(event);
++            }
++            self.bytes.clear();
++        }
++    }
++}
++
++/// `CSI 48 ; rows ; columns ; height ; width t` as (columns, rows).
++fn resize_report(bytes: &[u8]) -> Option<(u16, u16)> {
++    let body = bytes.strip_prefix(b"\x1b[48;")?.strip_suffix(b"t")?;
++    let mut fields = body.split(|&b| b == b';');
++    let mut number = || -> Option<u16> {
++        let field = fields.next()?;
++        if field.is_empty() || !field.iter().all(u8::is_ascii_digit) {
++            return None;
++        }
++        std::str::from_utf8(field).ok()?.parse().ok()
++    };
++    let rows = number()?;
++    let columns = number()?;
++    // The pixel size is not part of crossterm's resize event.
++    number()?;
++    number()?;
++    if fields.next().is_some() || rows == 0 || columns == 0 {
++        return None;
++    }
++    Some((columns, rows))
++}
++
++fn geometry(_fd: libc::c_int) -> io::Result<(u16, u16)> {
++    crate::terminal::sys::window_size().map(|size| (size.columns, size.rows))
++}
++
++/// Waits up to `timeout` for input on `fd`.
++fn readable(fd: libc::c_int, timeout: Duration) -> io::Result<bool> {
++    let mut poll = libc::pollfd {
++        fd,
++        events: libc::POLLIN,
++        revents: 0,
++    };
++    let millis = timeout.as_millis().min(i32::MAX as u128) as libc::c_int;
++    match unsafe { libc::poll(&mut poll, 1, millis) } {
++        n if n < 0 => Err(io::Error::last_os_error()),
++        0 => Ok(false),
++        _ if poll.revents & (libc::POLLERR | libc::POLLNVAL) != 0 => Err(io::Error::new(
++            io::ErrorKind::BrokenPipe,
++            "terminal input is no longer available",
++        )),
++        _ => Ok(poll.revents & libc::POLLIN != 0),
++    }
++}
++
++pub(crate) struct UnixInternalEventSource {
++    fd: FileDesc<'static>,
++    parser: Parser,
++    size: (u16, u16),
++    size_known: bool,
++    escape_since: Option<Instant>,
++    woken: Arc<AtomicBool>,
++    #[cfg(feature = "event-stream")]
++    waker: Waker,
++}
++
++impl UnixInternalEventSource {
++    pub fn new() -> io::Result<Self> {
++        let source = Self::from_file_descriptor(tty_fd()?)?;
++        // A terminal that does not know the mode ignores it; the size is
++        // then polled. The reports end when the console leaves raw mode.
++        let written = unsafe {
++            libc::write(
++                libc::STDOUT_FILENO,
++                ENABLE_RESIZE_REPORTS.as_ptr().cast(),
++                ENABLE_RESIZE_REPORTS.len(),
++            )
++        };
++        if written < 0 {
++            return Err(io::Error::last_os_error());
++        }
++        Ok(source)
++    }
++
++    pub(crate) fn from_file_descriptor(fd: FileDesc<'static>) -> io::Result<Self> {
++        let size = geometry(fd.raw_fd());
++        let size_known = size.is_ok();
++        let size = size.unwrap_or((0, 0));
++        let woken = Arc::new(AtomicBool::new(false));
++        Ok(Self {
++            fd,
++            parser: Parser::default(),
++            size,
++            size_known,
++            escape_since: None,
++            #[cfg(feature = "event-stream")]
++            waker: Waker::new(woken.clone()),
++            woken,
++        })
++    }
++
++    fn read_input(&mut self) -> io::Result<()> {
++        let mut buffer = [0u8; 4096];
++        let n = self.fd.read(&mut buffer)?;
++        if n == 0 {
++            return Err(io::Error::new(
++                io::ErrorKind::UnexpectedEof,
++                "terminal input closed",
++            ));
++        }
++        self.parser.feed(&buffer[..n])?;
++        self.escape_since = self.parser.escape_pending().then(Instant::now);
++        Ok(())
++    }
++
++    fn poll_geometry(&mut self) {
++        if self.parser.resize_reports || !self.size_known {
++            return;
++        }
++        // A console that cannot report its size cannot report a change.
++        let Ok(size) = geometry(self.fd.raw_fd()) else {
++            self.size_known = false;
++            return;
++        };
++        if size != self.size && size.0 > 0 && size.1 > 0 {
++            self.size = size;
++            self.parser
++                .events
++                .push_back(InternalEvent::Event(Event::Resize(size.0, size.1)));
++        }
++    }
++}
++
++impl EventSource for UnixInternalEventSource {
++    fn try_read(&mut self, timeout: Option<Duration>) -> io::Result<Option<InternalEvent>> {
++        let deadline = PollTimeout::new(timeout);
++        loop {
++            if let Some(event) = self.parser.events.pop_front() {
++                if let InternalEvent::Event(Event::Resize(columns, rows)) = event {
++                    self.size = (columns, rows);
++                }
++                return Ok(Some(event));
++            }
++            if self.woken.swap(false, Ordering::SeqCst) {
++                return Err(io::Error::new(
++                    io::ErrorKind::Interrupted,
++                    "Poll operation was woken up by `Waker::wake`",
++                ));
++            }
++            let mut wait = SLICE;
++            if let Some(since) = self.escape_since {
++                wait = wait.min(ESCAPE_WINDOW.saturating_sub(since.elapsed()));
++            }
++            if let Some(left) = deadline.leftover() {
++                wait = wait.min(left);
++            }
++            if readable(self.fd.raw_fd(), wait)? {
++                self.read_input()?;
++            } else {
++                if self.escape_since.is_some_and(|since| since.elapsed() >= ESCAPE_WINDOW) {
++                    self.parser.expire_escape();
++                    self.escape_since = None;
++                }
++                self.poll_geometry();
++            }
++            if self.parser.events.is_empty() && deadline.elapsed() {
++                return Ok(None);
++            }
++        }
++    }
++
++    #[cfg(feature = "event-stream")]
++    fn waker(&self) -> Waker {
++        self.waker.clone()
++    }
++}
++
++#[cfg(all(test, not(target_os = "aros")))]
++#[path = "aros_tests.rs"]
++mod tests;
+diff --git a/src/event/source/unix/aros_tests.rs b/src/event/source/unix/aros_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..b1c0ef971b1621499f7533323d750c66ae13b108
+--- /dev/null
++++ b/src/event/source/unix/aros_tests.rs
+@@ -0,0 +1,100 @@
++use super::*;
++use crate::event::{KeyCode, KeyEvent};
++use std::os::unix::io::FromRawFd;
++
++fn pipe() -> (FileDesc<'static>, std::fs::File) {
++    let mut fds = [0; 2];
++    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
++    (FileDesc::new(fds[0], true), unsafe { std::fs::File::from_raw_fd(fds[1]) })
++}
++
++fn key(event: Option<InternalEvent>) -> KeyEvent {
++    match event {
++        Some(InternalEvent::Event(Event::Key(key))) => key,
++        other => panic!("expected a key, got {other:?}"),
++    }
++}
++
++#[test]
++fn resize_reports_are_parsed_strictly() {
++    assert_eq!(resize_report(b"\x1b[48;37;117;666;940t"), Some((117, 37)));
++    assert_eq!(resize_report(b"\x1b[48;37;117;666t"), None);
++    assert_eq!(resize_report(b"\x1b[48;37;117;666;940;1t"), None);
++    assert_eq!(resize_report(b"\x1b[48;0;117;666;940t"), None);
++    assert_eq!(resize_report(b"\x1b[48;3a;117;666;940t"), None);
++    assert_eq!(resize_report(b"\x1b[8;37;117t"), None);
++}
++
++#[test]
++fn a_report_becomes_a_resize_event_and_stops_size_polling() {
++    let mut parser = Parser::default();
++    parser.feed(b"\x1b[48;24;80;400;640tx").unwrap();
++    assert!(parser.resize_reports);
++    assert!(matches!(parser.events.pop_front(), Some(InternalEvent::Event(Event::Resize(80, 24)))));
++    assert_eq!(key(parser.events.pop_front()).code, KeyCode::Char('x'));
++}
++
++#[test]
++fn a_lone_escape_waits_and_then_expires() {
++    let mut parser = Parser::default();
++    parser.feed(b"\x1b").unwrap();
++    assert!(parser.events.is_empty() && parser.escape_pending());
++    parser.expire_escape();
++    assert_eq!(key(parser.events.pop_front()).code, KeyCode::Esc);
++}
++
++#[test]
++fn a_sequence_split_across_reads_is_one_key() {
++    let mut parser = Parser::default();
++    parser.feed(b"\x1b[").unwrap();
++    parser.feed(b"A").unwrap();
++    assert_eq!(key(parser.events.pop_front()).code, KeyCode::Up);
++    assert!(parser.events.is_empty());
++}
++
++#[test]
++fn source_reads_bytes_and_times_out() {
++    use std::io::Write;
++    let (read, mut write) = pipe();
++    let mut source = UnixInternalEventSource::from_file_descriptor(read).unwrap();
++    assert!(source.try_read(Some(Duration::from_millis(10))).unwrap().is_none());
++    write.write_all(b"ab").unwrap();
++    assert_eq!(key(source.try_read(Some(Duration::from_millis(500))).unwrap()).code, KeyCode::Char('a'));
++    assert_eq!(key(source.try_read(Some(Duration::ZERO)).unwrap()).code, KeyCode::Char('b'));
++}
++
++#[test]
++fn source_turns_a_late_lone_escape_into_esc() {
++    use std::io::Write;
++    let (read, mut write) = pipe();
++    let mut source = UnixInternalEventSource::from_file_descriptor(read).unwrap();
++    write.write_all(b"\x1b").unwrap();
++    let started = Instant::now();
++    assert_eq!(key(source.try_read(Some(Duration::from_millis(500))).unwrap()).code, KeyCode::Esc);
++    assert!(started.elapsed() >= ESCAPE_WINDOW);
++}
++
++#[test]
++fn closed_input_is_an_error_not_an_idle_loop() {
++    let (read, write) = pipe();
++    drop(write);
++    let mut source = UnixInternalEventSource::from_file_descriptor(read).unwrap();
++    let error = source.try_read(Some(Duration::from_millis(100))).unwrap_err();
++    assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
++}
++
++#[cfg(feature = "event-stream")]
++#[test]
++fn a_wake_interrupts_a_blocking_read_within_one_slice() {
++    let (read, _write) = pipe();
++    let mut source = UnixInternalEventSource::from_file_descriptor(read).unwrap();
++    let waker = source.waker();
++    let started = Instant::now();
++    std::thread::spawn(move || {
++        std::thread::sleep(Duration::from_millis(50));
++        waker.wake().unwrap();
++    });
++    let error = source.try_read(None).unwrap_err();
++    assert_eq!(error.kind(), io::ErrorKind::Interrupted);
++    assert!(started.elapsed() < SLICE + Duration::from_millis(200));
++}
+diff --git a/src/event/sys/unix/waker.rs b/src/event/sys/unix/waker.rs
+index a97dab7be1bd68d27f1b2d5bafbfb650d61eca0c..de607bd4f4d1b45d57515a584c842ce8c22ee696 100644
+--- a/src/event/sys/unix/waker.rs
++++ b/src/event/sys/unix/waker.rs
+@@ -1,11 +1,17 @@
+-#[cfg(feature = "use-dev-tty")]
++#[cfg(any(target_os = "aros", feature = "aros-event-source"))]
++pub(crate) mod aros;
++
++#[cfg(all(not(any(target_os = "aros", feature = "aros-event-source")), feature = "use-dev-tty"))]
+ pub(crate) mod tty;
+ 
+-#[cfg(not(feature = "use-dev-tty"))]
++#[cfg(all(not(any(target_os = "aros", feature = "aros-event-source")), not(feature = "use-dev-tty")))]
+ pub(crate) mod mio;
+ 
+-#[cfg(feature = "use-dev-tty")]
++#[cfg(any(target_os = "aros", feature = "aros-event-source"))]
++pub(crate) use self::aros::Waker;
++
++#[cfg(all(not(any(target_os = "aros", feature = "aros-event-source")), feature = "use-dev-tty"))]
+ pub(crate) use self::tty::Waker;
+ 
+-#[cfg(not(feature = "use-dev-tty"))]
++#[cfg(all(not(any(target_os = "aros", feature = "aros-event-source")), not(feature = "use-dev-tty")))]
+ pub(crate) use self::mio::Waker;
+diff --git a/src/event/sys/unix/waker/aros.rs b/src/event/sys/unix/waker/aros.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..a25fad10291615020478f38e0cb88b463c7082d6
+--- /dev/null
++++ b/src/event/sys/unix/waker/aros.rs
+@@ -0,0 +1,28 @@
++use std::{
++    io,
++    sync::{
++        atomic::{AtomicBool, Ordering},
++        Arc,
++    },
++};
++
++/// Allows to wake up the EventSource::try_read() method.
++///
++/// The AROS source waits in slices and checks this flag between them, so a
++/// wake-up is seen within one slice; there is no pipe to signal it sooner.
++#[derive(Clone, Debug)]
++pub(crate) struct Waker {
++    woken: Arc<AtomicBool>,
++}
++
++impl Waker {
++    pub(crate) fn new(woken: Arc<AtomicBool>) -> Self {
++        Self { woken }
++    }
++
++    /// Wake up the [`Poll`] associated with this `Waker`.
++    pub(crate) fn wake(&self) -> io::Result<()> {
++        self.woken.store(true, Ordering::SeqCst);
++        Ok(())
++    }
++}
+diff --git a/src/terminal/sys/file_descriptor.rs b/src/terminal/sys/file_descriptor.rs
+index 2b8a3762606250a411a1645e77a1d3bdd94c997f..5d63a799044f29bcff6e6b685b71d4becace1611 100644
+--- a/src/terminal/sys/file_descriptor.rs
++++ b/src/terminal/sys/file_descriptor.rs
+@@ -119,6 +119,14 @@ impl AsFd for FileDesc<'_> {
+     }
+ }
+ 
++/// The process's own terminal when stdin is redirected. On AROS a path
++/// such as /dev/tty would name a volume and can open a "Please insert
++/// volume" requester; CONSOLE: is the console of the process.
++#[cfg(all(feature = "libc", not(target_os = "aros")))]
++const CONTROLLING_TERMINAL: &str = "/dev/tty";
++#[cfg(all(feature = "libc", target_os = "aros"))]
++const CONTROLLING_TERMINAL: &str = "CONSOLE:";
++
+ #[cfg(feature = "libc")]
+ /// Creates a file descriptor pointing to the standard input or `/dev/tty`.
+ pub fn tty_fd() -> io::Result<FileDesc<'static>> {
+@@ -129,7 +137,7 @@ pub fn tty_fd() -> io::Result<FileDesc<'static>> {
+             fs::OpenOptions::new()
+                 .read(true)
+                 .write(true)
+-                .open("/dev/tty")?
++                .open(CONTROLLING_TERMINAL)?
+                 .into_raw_fd(),
+             true,
+         )
+diff --git a/src/terminal/sys/unix.rs b/src/terminal/sys/unix.rs
+index 98685f8dbf70da64ed6d1b4870239604cd521e78..956c8f775903f0264df7bce8e29558af3cb3a026 100644
+--- a/src/terminal/sys/unix.rs
++++ b/src/terminal/sys/unix.rs
+@@ -1,9 +1,8 @@
+ //! UNIX related logic for terminal manipulation.
+ 
+-use crate::terminal::{
+-    sys::file_descriptor::{tty_fd, FileDesc},
+-    WindowSize,
+-};
++#[cfg(not(target_os = "aros"))]
++use crate::terminal::sys::file_descriptor::FileDesc;
++use crate::terminal::{sys::file_descriptor::tty_fd, WindowSize};
+ #[cfg(feature = "libc")]
+ use libc::{
+     cfmakeraw, ioctl, tcgetattr, tcsetattr, termios as Termios, winsize, STDOUT_FILENO, TCSANOW,
+@@ -16,12 +15,13 @@ use rustix::{
+     termios::{Termios, Winsize},
+ };
+ 
+-use std::{fs::File, io, process};
++#[cfg(not(target_os = "aros"))]
++use std::fs::File;
++use std::{io, process};
++#[cfg(all(feature = "libc", not(target_os = "aros")))]
++use std::os::unix::io::IntoRawFd;
+ #[cfg(feature = "libc")]
+-use std::{
+-    mem,
+-    os::unix::io::{IntoRawFd, RawFd},
+-};
++use std::{mem, os::unix::io::RawFd};
+ 
+ // Some(Termios) -> we're in the raw mode and this is the previous mode
+ // None -> we're not in the raw mode
+@@ -54,8 +54,31 @@ impl From<Winsize> for WindowSize {
+     }
+ }
+ 
++/// AROS has no /dev/tty: ask the console behind stdout, then the one behind
++/// stdin when stdout is redirected. Only a non-empty grid counts; a console
++/// that cannot tell its size may leave the structure zero.
+ #[allow(clippy::useless_conversion)]
+-#[cfg(feature = "libc")]
++#[cfg(all(feature = "libc", target_os = "aros"))]
++pub(crate) fn window_size() -> io::Result<WindowSize> {
++    for fd in [STDOUT_FILENO, libc::STDIN_FILENO] {
++        let mut size = winsize {
++            ws_row: 0,
++            ws_col: 0,
++            ws_xpixel: 0,
++            ws_ypixel: 0,
++        };
++        if unsafe { ioctl(fd, TIOCGWINSZ.into(), &mut size) } == 0 && size.ws_row > 0 && size.ws_col > 0 {
++            return Ok(size.into());
++        }
++    }
++    Err(io::Error::new(
++        io::ErrorKind::Unsupported,
++        "the console did not report its size",
++    ))
++}
++
++#[allow(clippy::useless_conversion)]
++#[cfg(all(feature = "libc", not(target_os = "aros")))]
+ pub(crate) fn window_size() -> io::Result<WindowSize> {
+     // http://rosettacode.org/wiki/Terminal_control/Dimensions#Library:_BSD_libc
+     let mut size = winsize {
+@@ -99,6 +122,10 @@ pub(crate) fn size() -> io::Result<(u16, u16)> {
+         return Ok((window_size.columns, window_size.rows));
+     }
+ 
++    // AROS has no tput; a failed search for it is all this would add.
++    #[cfg(target_os = "aros")]
++    return Err(std::io::Error::last_os_error());
++    #[cfg(not(target_os = "aros"))]
+     tput_size().ok_or_else(|| std::io::Error::last_os_error().into())
+ }
+ 
+@@ -182,7 +209,15 @@ fn set_terminal_attr(fd: impl AsFd, termios: &Termios) -> io::Result<()> {
+ ///
+ /// On unix systems, this function will block and possibly time out while
+ /// [`crossterm::event::read`](crate::event::read) or [`crossterm::event::poll`](crate::event::poll) are being called.
+-#[cfg(feature = "events")]
++/// No AROS console implements the kitty keyboard protocol, and none answers
++/// the primary device attributes query that ends the probe, so asking would
++/// only wait for its timeout.
++#[cfg(all(feature = "events", target_os = "aros"))]
++pub fn supports_keyboard_enhancement() -> io::Result<bool> {
++    Ok(false)
++}
++
++#[cfg(all(feature = "events", not(target_os = "aros")))]
+ pub fn supports_keyboard_enhancement() -> io::Result<bool> {
+     if is_raw_mode_enabled() {
+         read_supports_keyboard_enhancement_raw()
+@@ -191,7 +226,7 @@ pub fn supports_keyboard_enhancement() -> io::Result<bool> {
+     }
+ }
+ 
+-#[cfg(feature = "events")]
++#[cfg(all(feature = "events", not(target_os = "aros")))]
+ fn read_supports_keyboard_enhancement_flags() -> io::Result<bool> {
+     enable_raw_mode()?;
+     let flags = read_supports_keyboard_enhancement_raw();
+@@ -199,7 +234,7 @@ fn read_supports_keyboard_enhancement_flags() -> io::Result<bool> {
+     flags
+ }
+ 
+-#[cfg(feature = "events")]
++#[cfg(all(feature = "events", not(target_os = "aros")))]
+ fn read_supports_keyboard_enhancement_raw() -> io::Result<bool> {
+     use crate::event::{
+         filter::{KeyboardEnhancementFlagsFilter, PrimaryDeviceAttributesFilter},

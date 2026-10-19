@@ -1,0 +1,76 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 01:20:55 +0200
+Subject: [PATCH 2/5] AROS: settings in ENVARC:helix, cache in T:helix, runtime
+ in PROGDIR:
+
+Problem: AROS has no home directory unless the user sets HOME, and
+etcetera then panics ("Unable to find the config directory!"). The
+executable's directory came from argv[0], which is often a bare name
+found on the Shell's path, so canonicalising it panicked as well.
+Change: without HOME, configuration lives in ENVARC:helix (where Prefs
+keep settings across reboots) and the cache (the log) in T:helix; the
+runtime directory beside the program is PROGDIR:runtime.
+Repository: helix-editor/helix
+Base: a05c151bb6e8e9c65ec390b0ae2afe7a5efd619b (tag 25.07.1)
+Author: tomaszstaniak
+Date: 2026-10-19
+Platform scope: target_os = "aros" (x86_64 ABIv11); other targets unchanged.
+Upstream status: local-only (not submitted).
+Verification: hx --health on AROS One 1.3 lists
+ENVARC:helix/runtime;PROGDIR:runtime and finds the Rust queries there.
+---
+ helix-loader/src/lib.rs | 23 +++++++++++++++++++++++
+ 1 file changed, 23 insertions(+)
+
+diff --git a/helix-loader/src/lib.rs b/helix-loader/src/lib.rs
+index 54980dd7d0581ee0bb456f198276d608926def3b..5aced5d9ab99708596d176563cd94982e1b2ad57 100644
+--- a/helix-loader/src/lib.rs
++++ b/helix-loader/src/lib.rs
+@@ -65,8 +65,13 @@ fn prioritize_runtime_dirs() -> Vec<PathBuf> {
+         rt_dirs.push(dir.into());
+     }
+ 
++    // AROS: argv[0] is all std knows of the executable, often a bare name
++    // found on the Shell's path. PROGDIR: is always the program's drawer.
++    #[cfg(target_os = "aros")]
++    let exe_rt_dir = PathBuf::from("PROGDIR:").join(RT_DIR);
+     // fallback to location of the executable being run
+     // canonicalize the path in case the executable is symlinked
++    #[cfg(not(target_os = "aros"))]
+     let exe_rt_dir = std::env::current_exe()
+         .ok()
+         .and_then(|path| std::fs::canonicalize(path).ok())
+@@ -116,7 +121,21 @@ pub fn runtime_file(rel_path: impl AsRef<Path>) -> PathBuf {
+     })
+ }
+ 
++/// AROS has no home directory unless the user sets HOME. Settings then go
++/// where Prefs keep theirs across reboots, and the cache (the log file) to T:.
++#[cfg(target_os = "aros")]
++fn aros_dir(persistent: bool) -> Option<PathBuf> {
++    if std::env::var_os("HOME").is_some() {
++        return None;
++    }
++    Some(PathBuf::from(if persistent { "ENVARC:helix" } else { "T:helix" }))
++}
++
+ pub fn config_dir() -> PathBuf {
++    #[cfg(target_os = "aros")]
++    if let Some(dir) = aros_dir(true) {
++        return dir;
++    }
+     // TODO: allow env var override
+     let strategy = choose_base_strategy().expect("Unable to find the config directory!");
+     let mut path = strategy.config_dir();
+@@ -125,6 +144,10 @@ pub fn config_dir() -> PathBuf {
+ }
+ 
+ pub fn cache_dir() -> PathBuf {
++    #[cfg(target_os = "aros")]
++    if let Some(dir) = aros_dir(false) {
++        return dir;
++    }
+     // TODO: allow env var override
+     let strategy = choose_base_strategy().expect("Unable to find the cache directory!");
+     let mut path = strategy.cache_dir();

@@ -1,0 +1,9 @@
+{
+  "comment": "crates.io crates built from a patched copy. checksum: SHA-256 of the registry archive (the Cargo.lock checksum). Each has its own series in patches/crates/<name>-<version>/.",
+  "crates": [
+    {"name": "crossterm", "version": "0.28.1", "checksum": "829d955a0bb380ef178a640b91779e3987da38c9aea133b20614cfed8cdea9c6"},
+    {"name": "tempfile", "version": "3.20.0", "checksum": "e8a64e3985349f2441a1a9ef0b853f869006c3855f2cda6862a94d26ebb9d6a1"},
+    {"name": "which", "version": "8.0.0", "checksum": "d3fabb953106c3c8eea8306e4393700d7657561cb43122571b172bbfb7c7ba1d"},
+    {"name": "tree-house-bindings", "version": "0.2.1", "checksum": "3f1646788fe0afdbf8e191b5d0f558df7333d8857665a67053c532ec811e6086"}
+  ]
+}

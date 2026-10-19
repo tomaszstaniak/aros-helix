@@ -1,0 +1,5 @@
+0001-AROS-build-and-run-without-Unix-only-process-signal-.patch
+0002-AROS-settings-in-ENVARC-helix-cache-in-T-helix-runti.patch
+0003-Return-exit-codes-from-main_impl-instead-of-exiting-.patch
+0004-AROS-volume-and-assign-paths-are-absolute-also-in-fi.patch
+0005-AROS-tree-sitter-grammars-linked-into-the-program.patch

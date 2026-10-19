@@ -1,0 +1,9 @@
+{
+  "aros_gcc": "/path/to/x86_64-aros-gcc",
+  "aros_ar": "/path/to/x86_64-aros-ar",
+  "aros_sdk": "/path/to/abiv11-sdk",
+  "aros_src": "/path/to/deadwood2-AROS-checkout",
+  "rust_aros": "/path/to/rust-aros",
+  "rust_aros_commit": "full rust-aros commit",
+  "toolchain": "rustup name of the AROS std toolchain"
+}

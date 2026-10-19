@@ -1,0 +1,212 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 02:05:13 +0200
+Subject: [PATCH 4/5] AROS: volume and assign paths are absolute, also in file
+ URLs
+
+Problem: std counts only a leading / as a root on AROS, so a path such as
+"RAM Disk:hx/pl.txt" (what the current directory is there) counted as
+relative and the current directory was prepended again on every
+canonicalisation; the status line showed it three times and saving
+failed. url::Url::from_file_path refuses such paths, so saving panicked
+in Document::identifier.
+Change: helix_stdx::path::is_absolute treats a first component with a
+colon as absolute on AROS; canonicalize, get_relative_path, symlink
+targets, path completion and LSP file paths use it. helix_core::uri's
+file_url and file_path_from_url map "Work:x" to file:///Work:x and back.
+Repository: helix-editor/helix
+Base: a05c151bb6e8e9c65ec390b0ae2afe7a5efd619b (tag 25.07.1)
+Author: tomaszstaniak
+Date: 2026-10-19
+Platform scope: target_os = "aros" (x86_64 ABIv11); other targets unchanged.
+Upstream status: local-only (not submitted).
+Verification: on AROS One 1.3, opening pl.txt relative to RAM:hx shows
+"pl.txt", and saving works there and in the root of RAM:.
+---
+ Cargo.lock                                 |  3 ++
+ helix-core/src/uri.rs                      | 34 ++++++++++++++++++++--
+ helix-lsp/src/lib.rs                       |  2 +-
+ helix-stdx/src/path.rs                     | 19 ++++++++++--
+ helix-term/src/handlers/completion/path.rs |  4 +--
+ helix-view/src/document.rs                 |  4 +--
+ 6 files changed, 57 insertions(+), 9 deletions(-)
+
+diff --git a/Cargo.lock b/Cargo.lock
+index b4a663cb8e37d0dba25e8bfa43f39c7bc5f70958..cee748173416939c0bbfb351659adfa981ce6961 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1527,12 +1527,15 @@ dependencies = [
+  "bitflags",
+  "dunce",
+  "etcetera",
++ "getrandom 0.3.1",
++ "libc",
+  "once_cell",
+  "regex-automata",
+  "regex-cursor",
+  "ropey",
+  "rustix 1.0.7",
+  "tempfile",
++ "tokio",
+  "unicode-segmentation",
+  "which",
+  "windows-sys 0.60.2",
+diff --git a/helix-core/src/uri.rs b/helix-core/src/uri.rs
+index cbe0fadda67d66b2797e15e17693bf980e9bfd66..a7bddd65e484dccecab4a019f6f119214350d6ad 100644
+--- a/helix-core/src/uri.rs
++++ b/helix-core/src/uri.rs
+@@ -4,6 +4,36 @@
+     sync::Arc,
+ };
+ 
++/// A local path as a `file:` URL.
++///
++/// On AROS an absolute path starts with a volume or assign name (`Work:notes.txt`),
++/// which `url` does not take as absolute; it becomes `file:///Work:notes.txt`,
++/// and [`file_path_from_url`] turns it back.
++#[allow(clippy::result_unit_err)]
++pub fn file_url(path: &Path) -> Result<url::Url, ()> {
++    #[cfg(target_os = "aros")]
++    if helix_stdx::path::is_absolute(path) && !path.has_root() {
++        // Concatenated, not joined: joining `Work:x` replaces the base.
++        let mut rooted = std::ffi::OsString::from("/");
++        rooted.push(path);
++        return url::Url::from_file_path(PathBuf::from(rooted));
++    }
++    url::Url::from_file_path(path)
++}
++
++/// The local path of a `file:` URL; the inverse of [`file_url`].
++#[allow(clippy::result_unit_err)]
++pub fn file_path_from_url(url: &url::Url) -> Result<PathBuf, ()> {
++    let path = url.to_file_path()?;
++    #[cfg(target_os = "aros")]
++    if let Ok(rest) = path.strip_prefix("/") {
++        if helix_stdx::path::is_absolute(rest) {
++            return Ok(rest.to_path_buf());
++        }
++    }
++    Ok(path)
++}
++
+ /// A generic pointer to a file location.
+ ///
+ /// Currently this type only supports paths to local files.
+@@ -20,7 +50,7 @@ impl Uri {
+     #[allow(clippy::result_unit_err)]
+     pub fn to_url(&self) -> Result<url::Url, ()> {
+         match self {
+-            Uri::File(path) => url::Url::from_file_path(path),
++            Uri::File(path) => file_url(path),
+         }
+     }
+ 
+@@ -79,7 +109,7 @@ impl std::error::Error for UrlConversionError {}
+ 
+ fn convert_url_to_uri(url: &url::Url) -> Result<Uri, UrlConversionErrorKind> {
+     if url.scheme() == "file" {
+-        url.to_file_path()
++        file_path_from_url(url)
+             .map(|path| Uri::File(helix_stdx::path::normalize(path).into()))
+             .map_err(|_| UrlConversionErrorKind::UnableToConvert)
+     } else {
+diff --git a/helix-lsp/src/lib.rs b/helix-lsp/src/lib.rs
+index 567e8a7024bfa992c087bc1af1f6ae0f29455092..2259e77e103a5334536c022c2e2f1295b0e80821 100644
+--- a/helix-lsp/src/lib.rs
++++ b/helix-lsp/src/lib.rs
+@@ -957,7 +957,7 @@ pub fn find_lsp_workspace(
+     workspace_is_cwd: bool,
+ ) -> Option<PathBuf> {
+     let file = std::path::Path::new(file);
+-    let mut file = if file.is_absolute() {
++    let mut file = if helix_stdx::path::is_absolute(file) {
+         file.to_path_buf()
+     } else {
+         let current_dir = helix_stdx::env::current_working_dir();
+diff --git a/helix-stdx/src/path.rs b/helix-stdx/src/path.rs
+index 740f7bcb51d9f2c897ddfa8cb4f027014f685654..1cc4254a4aec3cc85d3c88a31973030498f089a5 100644
+--- a/helix-stdx/src/path.rs
++++ b/helix-stdx/src/path.rs
+@@ -127,13 +127,28 @@ pub fn normalize(path: impl AsRef<Path>) -> PathBuf {
+     dunce::simplified(&ret).to_path_buf()
+ }
+ 
++/// Whether `path` names its location without help from the current directory.
++///
++/// On AROS a path starting with a volume or assign name (`RAM:`, `Work:Projects/notes`)
++/// or with `:` (the root of the current volume) is absolute, but std counts only a
++/// leading `/` as a root there. Everywhere else this is [`Path::is_absolute`].
++pub fn is_absolute(path: &Path) -> bool {
++    #[cfg(target_os = "aros")]
++    if let Some(Component::Normal(first)) = path.components().next() {
++        if first.as_encoded_bytes().contains(&b':') {
++            return true;
++        }
++    }
++    path.is_absolute()
++}
++
+ /// Returns the canonical, absolute form of a path with all intermediate components normalized.
+ ///
+ /// This function is used instead of [`std::fs::canonicalize`] because we don't want to verify
+ /// here if the path exists, just normalize it's components.
+ pub fn canonicalize(path: impl AsRef<Path>) -> PathBuf {
+     let path = expand_tilde(path.as_ref());
+-    let path = if path.is_relative() {
++    let path = if !is_absolute(&path) {
+         Cow::Owned(current_working_dir().join(path))
+     } else {
+         path
+@@ -148,7 +163,7 @@ pub fn get_relative_path<'a, P>(path: P) -> Cow<'a, Path>
+     P: Into<Cow<'a, Path>>,
+ {
+     let path = path.into();
+-    if path.is_absolute() {
++    if is_absolute(&path) {
+         let cwdir = normalize(current_working_dir());
+         if let Ok(stripped) = normalize(&path).strip_prefix(cwdir) {
+             return Cow::Owned(PathBuf::from(stripped));
+diff --git a/helix-term/src/handlers/completion/path.rs b/helix-term/src/handlers/completion/path.rs
+index c2ffa5efa44e8925e9697676c4b2bd38ac9c273e..b58394a9838cf661c05d6e37d12525de4bd15ebc 100644
+--- a/helix-term/src/handlers/completion/path.rs
++++ b/helix-term/src/handlers/completion/path.rs
+@@ -36,7 +36,7 @@ pub(crate) fn path_completion(
+             let path: Cow<_> = if matched_path.starts_with("file://") {
+                 Url::from_str(&matched_path)
+                     .ok()
+-                    .and_then(|url| url.to_file_path().ok())?
++                    .and_then(|url| helix_core::uri::file_path_from_url(&url).ok())?
+                     .into()
+             } else {
+                 Path::new(&*matched_path).into()
+@@ -44,7 +44,7 @@ pub(crate) fn path_completion(
+             let path = path::expand(&path);
+             let parent_dir = doc.path().and_then(|dp| dp.parent());
+             let path = match parent_dir {
+-                Some(parent_dir) if path.is_relative() => parent_dir.join(&path),
++                Some(parent_dir) if !helix_stdx::path::is_absolute(&path) => parent_dir.join(&path),
+                 _ => path.into_owned(),
+             };
+             #[cfg(windows)]
+diff --git a/helix-view/src/document.rs b/helix-view/src/document.rs
+index e1dc035da2e9ff921848ed0ca56cee96bdd4a354..2b44c96eb28a2c935f16ed250aa1aa96cae3e8dc 100644
+--- a/helix-view/src/document.rs
++++ b/helix-view/src/document.rs
+@@ -1017,7 +1017,7 @@ impl Future<Output = Result<DocumentSavedEvent, anyhow::Error>> + 'static + Send
+                 .await
+                 .ok()
+                 .and_then(|p| {
+-                    if p.is_relative() {
++                    if !helix_stdx::path::is_absolute(&p) {
+                         path.parent().map(|parent| parent.join(p))
+                     } else {
+                         Some(p)
+@@ -1938,7 +1938,7 @@ pub fn path(&self) -> Option<&PathBuf> {
+ 
+     /// File path as a URL.
+     pub fn url(&self) -> Option<Url> {
+-        Url::from_file_path(self.path()?).ok()
++        helix_core::uri::file_url(self.path()?).ok()
+     }
+ 
+     pub fn uri(&self) -> Option<helix_core::Uri> {

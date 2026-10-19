@@ -1,0 +1,195 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 02:40:23 +0200
+Subject: [PATCH] AROS: build the tree-sitter runtime and take grammars linked
+ in
+
+Repository: crates.io tree-house-bindings 0.2.1 (archive SHA-256 3f164678...6086)
+Author: tomaszstaniak
+Date: 2026-10-19
+Platform scope: target_os / __AROS__; other targets unchanged.
+Upstream status: local-only (not submitted).
+Problem: AROS cannot load shared libraries (libloading does not build);
+the vendored runtime's portable/endian.h stops with "platform not
+supported"; the ABIv11 C library declares no wide-character
+classification, which query.c uses.
+Change: no libloading on AROS; Grammar::new reports NoDynamicLoading and
+the new Grammar::from_language takes a grammar linked into the program
+(after the same ABI version check). endian.h uses GCC's byte-order macros
+and builtins on AROS. query.c gets iswspace/iswalnum for AROS (ASCII
+exact, other characters except Unicode spaces count as letters).
+Verification: Rust highlighting in Helix on AROS One 1.3.
+Removal: endian.h and query.c parts when upstream tree-sitter covers
+AROS or the C library gains wctype.
+---
+ Cargo.toml                   |  2 +-
+ src/grammar.rs               | 40 ++++++++++++++++++++++++++++++++++++
+ vendor/src/portable/endian.h | 33 +++++++++++++++++++++++++++++
+ vendor/src/query.c           | 20 ++++++++++++++++++
+ 4 files changed, 94 insertions(+), 1 deletion(-)
+
+diff --git a/Cargo.toml b/Cargo.toml
+index 3fb9f075d7d82ba939df6306637c96df081716f0..631d9b5218fc96bcfe440fd569f8c3a5221e836f 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -33,7 +33,7 @@ ropey = ["dep:ropey"]
+ name = "tree_house_bindings"
+ path = "src/lib.rs"
+ 
+-[dependencies.libloading]
++[target.'cfg(not(target_os = "aros"))'.dependencies.libloading]
+ version = "0.8"
+ 
+ [dependencies.regex-cursor]
+diff --git a/src/grammar.rs b/src/grammar.rs
+index fdcd82a6ec293de480240117c0efe0b42e568cb4..9240e7e38431989e56fcca444973134e0e4e304b 100644
+--- a/src/grammar.rs
++++ b/src/grammar.rs
+@@ -2,6 +2,7 @@ use std::fmt;
+ use std::path::{Path, PathBuf};
+ use std::ptr::NonNull;
+ 
++#[cfg(not(target_os = "aros"))]
+ use libloading::{Library, Symbol};
+ 
+ /// Lowest supported ABI version of a grammar.
+@@ -30,12 +31,46 @@ impl std::fmt::Debug for Grammar {
+ }
+ 
+ impl Grammar {
++    /// Grammars cannot be loaded from shared libraries on AROS.
++    ///
++    /// # Safety
++    ///
++    /// Safe to call; `unsafe` matches the other platforms' signature.
++    #[cfg(target_os = "aros")]
++    pub unsafe fn new(_name: &str, library_path: &Path) -> Result<Grammar, Error> {
++        // AROS cannot load ELF shared objects; grammars are linked into the
++        // program and passed to `from_language`.
++        Err(Error::NoDynamicLoading {
++            path: library_path.to_owned(),
++        })
++    }
++
++    /// Takes a grammar linked into the program: `language` is the address its
++    /// `tree_sitter_<name>()` function returns.
++    ///
++    /// # Safety
++    ///
++    /// `language` must be a valid tree sitter language that lives for the
++    /// rest of the program.
++    pub unsafe fn from_language(language: NonNull<std::ffi::c_void>) -> Result<Grammar, Error> {
++        let grammar = Grammar {
++            ptr: language.cast(),
++        };
++        let version = grammar.abi_version();
++        if (MIN_COMPATIBLE_ABI_VERSION..=ABI_VERSION).contains(&version) {
++            Ok(grammar)
++        } else {
++            Err(Error::IncompatibleVersion { version })
++        }
++    }
++
+     /// Loads a shared library containing a tree sitter grammar with name `name`
+     // from `library_path`.
+     ///
+     /// # Safety
+     ///
+     /// `library_path` must be a valid tree sitter grammar
++    #[cfg(not(target_os = "aros"))]
+     pub unsafe fn new(name: &str, library_path: &Path) -> Result<Grammar, Error> {
+         let library = unsafe {
+             Library::new(library_path).map_err(|err| Error::DlOpen {
+@@ -74,12 +109,17 @@ impl Grammar {
+ 
+ #[derive(thiserror::Error, Debug)]
+ pub enum Error {
++    #[cfg(target_os = "aros")]
++    #[error("Grammar {path:?} not loaded: AROS has no shared libraries; link the grammar in")]
++    NoDynamicLoading { path: PathBuf },
++    #[cfg(not(target_os = "aros"))]
+     #[error("Error opening dynamic library {path:?}")]
+     DlOpen {
+         #[source]
+         err: libloading::Error,
+         path: PathBuf,
+     },
++    #[cfg(not(target_os = "aros"))]
+     #[error("Failed to load symbol {symbol}")]
+     DlSym {
+         #[source]
+diff --git a/vendor/src/portable/endian.h b/vendor/src/portable/endian.h
+index f467ec535fcfa9abc7d3a417c4d7bdab40e4a10b..211086508595797406a2f1297ac1b1f7100b59e8 100644
+--- a/vendor/src/portable/endian.h
++++ b/vendor/src/portable/endian.h
+@@ -230,6 +230,39 @@
+ #    define le32toh(x) ENDIAN_LE32(x)
+ #    define le64toh(x) ENDIAN_LE64(x)
+ 
++#elif defined(__AROS__)
++
++/* AROS: no endian.h; GCC's byte-order macros and byte-swap builtins. */
++#    if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
++#        define htobe16(x) __builtin_bswap16(x)
++#        define htole16(x) (x)
++#        define be16toh(x) __builtin_bswap16(x)
++#        define le16toh(x) (x)
++#        define htobe32(x) __builtin_bswap32(x)
++#        define htole32(x) (x)
++#        define be32toh(x) __builtin_bswap32(x)
++#        define le32toh(x) (x)
++#        define htobe64(x) __builtin_bswap64(x)
++#        define htole64(x) (x)
++#        define be64toh(x) __builtin_bswap64(x)
++#        define le64toh(x) (x)
++#    elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
++#        define htobe16(x) (x)
++#        define htole16(x) __builtin_bswap16(x)
++#        define be16toh(x) (x)
++#        define le16toh(x) __builtin_bswap16(x)
++#        define htobe32(x) (x)
++#        define htole32(x) __builtin_bswap32(x)
++#        define be32toh(x) (x)
++#        define le32toh(x) __builtin_bswap32(x)
++#        define htobe64(x) (x)
++#        define htole64(x) __builtin_bswap64(x)
++#        define be64toh(x) (x)
++#        define le64toh(x) __builtin_bswap64(x)
++#    else
++#        error byte order not supported
++#    endif
++
+ #else
+ 
+ #    error platform not supported
+diff --git a/vendor/src/query.c b/vendor/src/query.c
+index 4748a00f9bbe8639ffde427731e6b68b22be0225..5bb27e315152b1201bd395ffda4d42d17f3648f8 100644
+--- a/vendor/src/query.c
++++ b/vendor/src/query.c
+@@ -17,6 +17,26 @@
+ #include "./unicode.h"
+ #include <wctype.h>
+ 
++#ifdef __AROS__
++// The AROS ABIv11 C library declares no wide-character classification
++// (wctype.h marks it all not implemented). Query source is ASCII in
++// practice; any other character except the Unicode spaces counts as a
++// letter, so identifiers in other scripts still parse.
++static inline int ts_aros_iswspace(int32_t c) {
++  return c == ' ' || (c >= '\t' && c <= '\r') || c == 0x85 || c == 0xa0 ||
++         c == 0x1680 || (c >= 0x2000 && c <= 0x200a) || c == 0x2028 ||
++         c == 0x2029 || c == 0x202f || c == 0x205f || c == 0x3000;
++}
++static inline int ts_aros_iswalnum(int32_t c) {
++  if (c < 0x80) {
++    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
++  }
++  return !ts_aros_iswspace(c);
++}
++#define iswspace ts_aros_iswspace
++#define iswalnum ts_aros_iswalnum
++#endif
++
+ // #define DEBUG_ANALYZE_QUERY
+ // #define DEBUG_EXECUTE_QUERY
+ 
