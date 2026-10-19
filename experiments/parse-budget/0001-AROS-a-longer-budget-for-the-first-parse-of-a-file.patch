@@ -1,0 +1,68 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 11:52:23 +0200
+Subject: [PATCH] AROS: a longer budget for the first parse of a file
+
+Problem: one 500 ms budget covers both the first parse of a file and the
+update after each edit. On AROS (x86_64 under QEMU TCG) the first parse of
+a 230 KB Rust file (helix-term/src/commands.rs, 6825 lines) timed out, so
+the file opened without highlighting.
+Change: on AROS the first parse may take 3 s. Updates after edits keep
+500 ms: for that file they took 0.3-1.0 s each (depending on the boot), so a
+longer update budget would keep highlighting at the price of that lag per
+keystroke; with 500 ms a slow update switches highlighting off for the
+buffer, as upstream does. A 27 KB file updated in 0.05-0.11 s.
+Repository: helix-editor/helix
+Base: a05c151bb6e8e9c65ec390b0ae2afe7a5efd619b (tag 25.07.1)
+Author: tomaszstaniak
+Date: 2026-10-19
+Platform scope: target_os = "aros"; other targets unchanged.
+Upstream status: local-only (not submitted).
+Verification: guest timings from a diagnostic build (timing logs) on AROS
+One 1.3, pool v11-1, three boots; guest clocks under TCG run at a varying
+rate, so the figures are guest time. With 3 s the 230 KB file opened
+highlighted in two boots (Syntax::new 1.4 s and 4.5 s including queries).
+---
+ helix-core/src/syntax.rs | 18 +++++++++++++++++-
+ 1 file changed, 17 insertions(+), 1 deletion(-)
+
+diff --git a/helix-core/src/syntax.rs b/helix-core/src/syntax.rs
+index 8fa185c6f..daa476257 100644
+--- a/helix-core/src/syntax.rs
++++ b/helix-core/src/syntax.rs
+@@ -430,7 +430,23 @@ pub struct Syntax {
+     inner: tree_house::Syntax,
+ }
+ 
++#[cfg(not(target_os = "aros"))]
+ const PARSE_TIMEOUT: Duration = Duration::from_millis(500); // half a second is pretty generous
++#[cfg(not(target_os = "aros"))]
++const UPDATE_PARSE_TIMEOUT: Duration = PARSE_TIMEOUT;
++
++// AROS (x86_64, measured under QEMU TCG): the first parse of a 230 KB Rust
++// file timed out at 500 ms and the file opened without highlighting. With a
++// 3 s budget it parsed in both boots measured (Syntax::new, queries
++// included, took 1.4 s and 4.5 s of guest time). Opening may wait that long once. Edits keep the upstream budget: an
++// update of that file took 0.3-1.0 s per keystroke, and a longer budget
++// would keep the highlighting at the price of that lag; with 500 ms a slow
++// update switches highlighting off for the buffer instead. A 27 KB file
++// updated in 0.05-0.1 s.
++#[cfg(target_os = "aros")]
++const PARSE_TIMEOUT: Duration = Duration::from_secs(3);
++#[cfg(target_os = "aros")]
++const UPDATE_PARSE_TIMEOUT: Duration = Duration::from_millis(500);
+ 
+ impl Syntax {
+     pub fn new(source: RopeSlice, language: Language, loader: &Loader) -> Result<Self, Error> {
+@@ -449,7 +465,7 @@ pub fn update(
+         if edits.is_empty() {
+             Ok(())
+         } else {
+-            self.inner.update(source, PARSE_TIMEOUT, &edits, loader)
++            self.inner.update(source, UPDATE_PARSE_TIMEOUT, &edits, loader)
+         }
+     }
+ 
+-- 
+2.54.0 (Apple Git-157)
+

@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 11:16:21 +0200
+Subject: [PATCH 2/3] DIAGNOSTIC ONLY: HX_DIAG_FAIL_WRITE fails a save after
+ truncating the file
+
+---
+ helix-view/src/document.rs | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/helix-view/src/document.rs b/helix-view/src/document.rs
+index 2b44c96eb..583c21903 100644
+--- a/helix-view/src/document.rs
++++ b/helix-view/src/document.rs
+@@ -1068,6 +1068,11 @@ impl Future<Output = Result<DocumentSavedEvent, anyhow::Error>> + 'static + Send
+ 
+             let write_result: anyhow::Result<_> = async {
+                 let mut dst = tokio::fs::File::create(&write_path).await?;
++                // DIAGNOSTIC ONLY: a write that fails after the file was truncated.
++                if std::env::var_os("HX_DIAG_FAIL_WRITE").is_some() {
++                    tokio::io::AsyncWriteExt::write_all(&mut dst, b"partial").await?;
++                    anyhow::bail!("diagnostic write failure (HX_DIAG_FAIL_WRITE)");
++                }
+                 to_writer(&mut dst, encoding_with_bom_info, &text).await?;
+                 dst.sync_all().await?;
+                 Ok(())
+-- 
+2.54.0 (Apple Git-157)
+

@@ -25,3 +25,25 @@ Run: build with the AROS compiler,
 in Limpet and in CON:.
 Found: from the main task, descriptors 0 and 1 answer (24x80 in Limpet,
 31x76 in CON:); descriptor 2 fails with a positive 9 instead of -1.
+
+## timing
+
+Question: where does Helix spend its time on AROS: first parse, update after
+an edit, building a frame, writing it to the terminal?
+Run: apply `timing/*.patch` to `work/helix` on a branch, build with
+`HX_BUILD_ROOT=build/v11-timing python3 scripts/hx.py build`, start
+`hx -v --log RAM:t.log FILE` and read the `timing` lines. The patches also
+add `HX_DIAG_FAIL_WRITE` (a save fails after the file was truncated) and
+`HX_DIAG_PARSE_TIMEOUT_MS` (another budget for the first parse). They are
+diagnostic only and are never part of a release.
+Found (AROS One 1.3 under QEMU TCG, 2026-10-19): drawing to the terminal
+takes most of each frame (about 30-150 ms on average, up to 460 ms);
+building it 7-25 ms. A 230 KB Rust file needs more than the 500 ms parse
+budget (1.4-4.5 s with a longer one) and then 0.3-1 s per edit; a 27 KB file
+0.05-0.1 s per edit. Guest speed differed up to 3x between boots.
+
+## parse-budget
+
+Tried and rejected: `parse-budget/0001-*.patch` gives the first parse 3 s on
+AROS. The 230 KB file then opened highlighted, but each keystroke re-parsed
+for 0.3-1 s and keys queued up. Kept for reference; not in the series.

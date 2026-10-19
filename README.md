@@ -11,6 +11,7 @@ script that turns them into an AROS executable.
 | | |
 |---|---|
 | Helix | 25.07.1 |
+| Port | preview 1 |
 | Target | AROS x86_64 ABIv11 (AROS One) |
 | Terminal | Limpet 0.6.1 or later |
 | Syntax highlighting | Rust |
@@ -19,12 +20,15 @@ script that turns them into an AROS executable.
 
 Opening, editing and saving files, including UTF-8 text and Polish letters
 typed on a Polish keymap; search, selections, yank and paste, the usual keys;
-resizing the window; quitting back to a working Shell. Settings go to
-`ENVARC:helix/`, the log to `T:helix/`.
+Helix's own colour theme; resizing the window; quitting back to a working
+Shell, or closing the window. Settings go to `ENVARC:helix/`, the log to
+`T:helix/`.
 
 Not yet: language servers, debug adapters, formatters, `:sh` and `:pipe`
 (Helix cannot start other programs on AROS yet), Git integration, the system
-clipboard, and grammars other than Rust.
+clipboard, and grammars other than Rust. Large files (thousands of lines)
+open without highlighting, and screen updates are slower than on other
+systems.
 
 See [using Helix on AROS](docs/README.md).
 

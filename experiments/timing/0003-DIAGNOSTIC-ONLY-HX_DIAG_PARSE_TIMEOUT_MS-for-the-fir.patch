@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 11:38:22 +0200
+Subject: [PATCH 3/3] DIAGNOSTIC ONLY: HX_DIAG_PARSE_TIMEOUT_MS for the first
+ parse
+
+---
+ helix-core/src/syntax.rs | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/helix-core/src/syntax.rs b/helix-core/src/syntax.rs
+index 8bcc618e3..05576f534 100644
+--- a/helix-core/src/syntax.rs
++++ b/helix-core/src/syntax.rs
+@@ -435,7 +435,10 @@ pub struct Syntax {
+ impl Syntax {
+     pub fn new(source: RopeSlice, language: Language, loader: &Loader) -> Result<Self, Error> {
+         let started = std::time::Instant::now();
+-        let result = tree_house::Syntax::new(source, language, PARSE_TIMEOUT, loader);
++        // DIAGNOSTIC ONLY: another budget for the first parse.
++        let timeout = std::env::var("HX_DIAG_PARSE_TIMEOUT_MS").ok().and_then(|v| v.parse().ok())
++            .map(Duration::from_millis).unwrap_or(PARSE_TIMEOUT);
++        let result = tree_house::Syntax::new(source, language, timeout, loader);
+         log::info!(target: "timing", "timing syntax-new bytes={} us={} ok={}", source.len_bytes(), started.elapsed().as_micros(), result.is_ok());
+         let inner = result?;
+         Ok(Self { inner })
+-- 
+2.54.0 (Apple Git-157)
+

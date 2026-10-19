@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 11:15:09 +0200
+Subject: [PATCH 1/3] DIAGNOSTIC ONLY: timing logs for syntax parsing,
+ rendering and input
+
+---
+ helix-core/src/syntax.rs      | 10 ++++++++--
+ helix-term/src/application.rs |  6 ++++++
+ 2 files changed, 14 insertions(+), 2 deletions(-)
+
+diff --git a/helix-core/src/syntax.rs b/helix-core/src/syntax.rs
+index 8fa185c6f..8bcc618e3 100644
+--- a/helix-core/src/syntax.rs
++++ b/helix-core/src/syntax.rs
+@@ -434,7 +434,10 @@ pub struct Syntax {
+ 
+ impl Syntax {
+     pub fn new(source: RopeSlice, language: Language, loader: &Loader) -> Result<Self, Error> {
+-        let inner = tree_house::Syntax::new(source, language, PARSE_TIMEOUT, loader)?;
++        let started = std::time::Instant::now();
++        let result = tree_house::Syntax::new(source, language, PARSE_TIMEOUT, loader);
++        log::info!(target: "timing", "timing syntax-new bytes={} us={} ok={}", source.len_bytes(), started.elapsed().as_micros(), result.is_ok());
++        let inner = result?;
+         Ok(Self { inner })
+     }
+ 
+@@ -449,7 +452,10 @@ pub fn update(
+         if edits.is_empty() {
+             Ok(())
+         } else {
+-            self.inner.update(source, PARSE_TIMEOUT, &edits, loader)
++            let started = std::time::Instant::now();
++            let result = self.inner.update(source, PARSE_TIMEOUT, &edits, loader);
++            log::info!(target: "timing", "timing syntax-update bytes={} us={} ok={}", source.len_bytes(), started.elapsed().as_micros(), result.is_ok());
++            result
+         }
+     }
+ 
+diff --git a/helix-term/src/application.rs b/helix-term/src/application.rs
+index b21657f3a..d835cac12 100644
+--- a/helix-term/src/application.rs
++++ b/helix-term/src/application.rs
+@@ -273,13 +273,16 @@ async fn render(&mut self) {
+ 
+         let surface = self.terminal.current_buffer_mut();
+ 
++        let started = std::time::Instant::now();
+         self.compositor.render(area, surface, &mut cx);
++        let composed = started.elapsed();
+         let (pos, kind) = self.compositor.cursor(area, &self.editor);
+         // reset cursor cache
+         self.editor.cursor_cache.reset();
+ 
+         let pos = pos.map(|pos| (pos.col as u16, pos.row as u16));
+         self.terminal.draw(pos, kind).unwrap();
++        log::info!(target: "timing", "timing render compose-us={} draw-us={}", composed.as_micros(), (started.elapsed() - composed).as_micros());
+     }
+ 
+     pub async fn event_loop<S>(&mut self, input_stream: &mut S)
+@@ -649,6 +652,9 @@ pub async fn handle_terminal_events(&mut self, event: std::io::Result<CrosstermE
+             jobs: &mut self.jobs,
+             scroll: None,
+         };
++        if let Ok(event) = &event {
++            log::info!(target: "timing", "timing event {:?}", event);
++        }
+         // Handle key events
+         let should_redraw = match event.unwrap() {
+             CrosstermEvent::Resize(width, height) => {
+-- 
+2.54.0 (Apple Git-157)
+
