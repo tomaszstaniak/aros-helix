@@ -1,0 +1,150 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 20:57:49 +0200
+Subject: [PATCH] DIAGNOSTIC ONLY: aggregated responsiveness counters (perf log
+ target)
+
+---
+ helix-term/src/application.rs | 105 ++++++++++++++++++++++++++++++++++
+ 1 file changed, 105 insertions(+)
+
+diff --git a/helix-term/src/application.rs b/helix-term/src/application.rs
+index 97f8e8b4a..6fd938b4f 100644
+--- a/helix-term/src/application.rs
++++ b/helix-term/src/application.rs
+@@ -60,6 +60,75 @@
+ 
+ type Terminal = tui::terminal::Terminal<TerminalBackend>;
+ 
++/// DIAGNOSTIC ONLY: aggregated responsiveness counters, one `perf` log line
++/// per second of activity. Guest clock only; nothing per key is written.
++mod perf {
++    use std::sync::Mutex;
++    use std::time::{Duration, Instant};
++
++    pub struct Perf {
++        start: Option<Instant>,
++        pub keys: u64,
++        pub downs: u64,
++        pub renders: u64,
++        pub compose_us: u64,
++        pub compose_max: u64,
++        pub draw_us: u64,
++        pub draw_max: u64,
++        pub handle_us: u64,
++        pub handle_max: u64,
++        pub lines_moved: u64,
++        pub scroll_lines: u64,
++        last_line: Option<usize>,
++        last_top: Option<usize>,
++        last_event: Option<Instant>,
++        pub event_gap_max: u64,
++    }
++
++    pub static PERF: Mutex<Perf> = Mutex::new(Perf {
++        start: None, keys: 0, downs: 0, renders: 0, compose_us: 0, compose_max: 0,
++        draw_us: 0, draw_max: 0, handle_us: 0, handle_max: 0, lines_moved: 0,
++        scroll_lines: 0, last_line: None, last_top: None, last_event: None, event_gap_max: 0,
++    });
++
++    impl Perf {
++        pub fn event(&mut self, now: Instant) {
++            if let Some(last) = self.last_event {
++                self.event_gap_max = self.event_gap_max.max((now - last).as_micros() as u64);
++            }
++            self.last_event = Some(now);
++            self.start.get_or_insert(now);
++        }
++        pub fn position(&mut self, line: usize, top: usize) {
++            if let Some(last) = self.last_line {
++                self.lines_moved += line.abs_diff(last) as u64;
++            }
++            if let Some(last) = self.last_top {
++                self.scroll_lines += top.abs_diff(last) as u64;
++            }
++            self.last_line = Some(line);
++            self.last_top = Some(top);
++        }
++        pub fn maybe_report(&mut self, now: Instant) {
++            let Some(start) = self.start else { return };
++            if now - start < Duration::from_secs(1) {
++                return;
++            }
++            log::info!(target: "perf",
++                "perf ms={} keys={} downs={} renders={} moved={} scrolled={} handle_us={} handle_max={} compose_us={} compose_max={} draw_us={} draw_max={} event_gap_max={}",
++                (now - start).as_millis(), self.keys, self.downs, self.renders, self.lines_moved,
++                self.scroll_lines, self.handle_us, self.handle_max, self.compose_us, self.compose_max,
++                self.draw_us, self.draw_max, self.event_gap_max);
++            let (line, top, last) = (self.last_line, self.last_top, self.last_event);
++            *self = Perf {
++                start: None, keys: 0, downs: 0, renders: 0, compose_us: 0, compose_max: 0,
++                draw_us: 0, draw_max: 0, handle_us: 0, handle_max: 0, lines_moved: 0,
++                scroll_lines: 0, last_line: line, last_top: top, last_event: last, event_gap_max: 0,
++            };
++        }
++    }
++}
++
+ pub struct Application {
+     compositor: Compositor,
+     terminal: Terminal,
+@@ -273,13 +342,28 @@ async fn render(&mut self) {
+ 
+         let surface = self.terminal.current_buffer_mut();
+ 
++        let started = std::time::Instant::now();
+         self.compositor.render(area, surface, &mut cx);
++        let composed = started.elapsed();
+         let (pos, kind) = self.compositor.cursor(area, &self.editor);
+         // reset cursor cache
+         self.editor.cursor_cache.reset();
+ 
+         let pos = pos.map(|pos| (pos.col as u16, pos.row as u16));
+         self.terminal.draw(pos, kind).unwrap();
++        let drawn = started.elapsed() - composed;
++        let (view, doc) = helix_view::current_ref!(self.editor);
++        let text = doc.text().slice(..);
++        let line = doc.selection(view.id).primary().cursor_line(text);
++        let top = text.char_to_line(doc.view_offset(view.id).anchor.min(text.len_chars()));
++        let mut perf = perf::PERF.lock().unwrap();
++        perf.renders += 1;
++        perf.compose_us += composed.as_micros() as u64;
++        perf.compose_max = perf.compose_max.max(composed.as_micros() as u64);
++        perf.draw_us += drawn.as_micros() as u64;
++        perf.draw_max = perf.draw_max.max(drawn.as_micros() as u64);
++        perf.position(line, top);
++        perf.maybe_report(std::time::Instant::now());
+     }
+ 
+     pub async fn event_loop<S>(&mut self, input_stream: &mut S)
+@@ -648,6 +732,27 @@ pub async fn handle_editor_event(&mut self, event: EditorEvent) -> bool {
+     }
+ 
+     pub async fn handle_terminal_events(&mut self, event: std::io::Result<CrosstermEvent>) {
++        let handled = std::time::Instant::now();
++        if let Ok(CrosstermEvent::Key(key)) = &event {
++            let mut perf = perf::PERF.lock().unwrap();
++            perf.event(handled);
++            if key.kind != crossterm::event::KeyEventKind::Release {
++                perf.keys += 1;
++                if key.code == crossterm::event::KeyCode::Down {
++                    perf.downs += 1;
++                }
++            }
++        }
++        self.handle_terminal_event(event).await;
++        let now = std::time::Instant::now();
++        let mut perf = perf::PERF.lock().unwrap();
++        let us = (now - handled).as_micros() as u64;
++        perf.handle_us += us;
++        perf.handle_max = perf.handle_max.max(us);
++        perf.maybe_report(now);
++    }
++
++    async fn handle_terminal_event(&mut self, event: std::io::Result<CrosstermEvent>) {
+         let mut cx = crate::compositor::Context {
+             editor: &mut self.editor,
+             jobs: &mut self.jobs,
+-- 
+2.54.0 (Apple Git-157)
+

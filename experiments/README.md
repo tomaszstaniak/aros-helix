@@ -42,6 +42,25 @@ building it 7-25 ms. A 230 KB Rust file needs more than the 500 ms parse
 budget (1.4-4.5 s with a longer one) and then 0.3-1 s per edit; a 27 KB file
 0.05-0.1 s per edit. Guest speed differed up to 3x between boots.
 
+## timing: aggregated counters (0004)
+
+Question: when Down is held in Limpet, where does the time go, and do keys
+pile up?
+Run: apply `timing/0004-*.patch` alone (not with 0001-0003, which touch the
+same lines) to the `aros` branch, build with
+`HX_BUILD_ROOT=build/v11-perf python3 scripts/hx.py build`, start
+`hx -v --log RAM:h.log FILE`. Each second with key input gives one `perf`
+line: keys, Down keys, renders, lines moved and scrolled, and the time spent
+handling events, composing and drawing (total and largest). Limpet's
+counterpart is `make abiv11-perf` (`XTERM_PERF_LOG`).
+Found (AROS One 1.3, Limpet 0.6.1, 2026-10-19): a scrolled screen is about
+8 KB that Helix's line-buffered stdout writes in nine 1 KB pieces; Limpet
+redrew after each piece, so Helix's draw took 165-215 ms per scrolled frame
+and a held Down was handled at 5-6 keys a second while 16-18 arrived. With
+Limpet redrawing after its output pauses (Limpet `d41d71e`) the draw took
+25-34 ms per frame and the keys were handled at 8-18 a second (25 without
+highlighting). Details in Limpet's `docs/evidence/2026-10-19-down-key/`.
+
 ## parse-budget
 
 Tried and rejected: `parse-budget/0001-*.patch` gives the first parse 3 s on
