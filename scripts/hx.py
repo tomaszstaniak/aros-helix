@@ -412,6 +412,9 @@ def cmd_build(args):
     env = dict(os.environ, AROS_GCC=cfg["aros_gcc"], AROS_SDK=cfg["aros_sdk"], AROS_AR=cfg["aros_ar"],
                CARGO_HOME=cfg["cargo_home"], CARGO_TARGET_DIR=str(root / "target"),
                HELIX_DISABLE_AUTO_GRAMMAR_BUILD="1",
+               # Helix's build script names the Git commit it finds; the staged
+               # copy sits inside this repository, whose commit is not Helix's.
+               GIT_CEILING_DIRECTORIES=str(root),
                # The C parts (tree-sitter's runtime) for the cc crate.
                CC_x86_64_aros=cfg["aros_gcc"], AR_x86_64_aros=cfg["aros_ar"],
                # The cc crate asks for PIC; AROS executables are static, and PIC
@@ -465,7 +468,7 @@ def cmd_build(args):
     print(json.dumps(record, indent=2))
 
 
-PACKAGE_VERSION = "25.07.1-aros1"
+PACKAGE_VERSION = "25.07.1-aros-preview1"
 
 
 def cmd_package(args):
