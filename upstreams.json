@@ -13,5 +13,27 @@
       "license": "MIT",
       "role": "unmodified grammar linked into hx for AROS; the revision Helix 25.07.1's languages.toml names"
     }
+  },
+  "build_environment": {
+    "rust-aros": {
+      "url": "https://github.com/tomaszstaniak/rust-aros.git",
+      "branch": "helix-preview-1",
+      "commit": "8ddbab93e948150828f368225a6b1f51fef73be7",
+      "role": "Rust std patch, libc-aros and target template; not patched here. Preview 1 was built from c85b6c763c37, whose tree is identical (the published history differs only in two commit e-mail addresses)."
+    },
+    "rust-toolchain": {
+      "base": "nightly-2026-08-31",
+      "rustc": "rustc 1.100.0-nightly (0dfb098f3 2026-08-31)",
+      "made_with": "rust-aros std-groundwork/std-patch/make-std-toolchain.sh"
+    },
+    "aros-pthread-source": {
+      "url": "https://github.com/deadwood2/AROS.git",
+      "commit": "5376f09bc1ed0c36a12fbb096406013f8a046e89",
+      "role": "compiler/pthread, rebuilt with patches/aros-pthread"
+    },
+    "aros-sdk": {
+      "name": "ABIv11 2026.09 Developer SDK with GCC 10.5.0",
+      "role": "compiler and SDK for the AROS parts"
+    }
   }
 }

@@ -22,8 +22,8 @@ verified there. Mainline needs its own SDK, toolchain and test run.
 - A deadwood2/AROS checkout at `5376f09bc1ed0c36a12fbb096406013f8a046e89`: the
   build compiles two objects of its `compiler/pthread` with this port's
   `patches/aros-pthread` (see that directory's README).
-- [rust-aros](https://github.com/tomaszstaniak/rust-aros) at the commit named in
-  your `local.json`, and a std toolchain made from it:
+- [rust-aros](https://github.com/tomaszstaniak/rust-aros) at the commit in
+  `upstreams.json` (`build_environment`), and a std toolchain made from it:
 
       AROS_RUST_BASE=nightly rust-aros/std-groundwork/std-patch/make-std-toolchain.sh \
           /new/sysroot aros-helix
