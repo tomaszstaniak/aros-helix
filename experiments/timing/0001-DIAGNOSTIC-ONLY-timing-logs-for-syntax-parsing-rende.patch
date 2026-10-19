@@ -38,7 +38,7 @@ index 8fa185c6f..8bcc618e3 100644
      }
  
 diff --git a/helix-term/src/application.rs b/helix-term/src/application.rs
-index b21657f3a..d835cac12 100644
+index 97f8e8b4a..bfb0d655a 100644
 --- a/helix-term/src/application.rs
 +++ b/helix-term/src/application.rs
 @@ -273,13 +273,16 @@ async fn render(&mut self) {
@@ -58,7 +58,7 @@ index b21657f3a..d835cac12 100644
      }
  
      pub async fn event_loop<S>(&mut self, input_stream: &mut S)
-@@ -649,6 +652,9 @@ pub async fn handle_terminal_events(&mut self, event: std::io::Result<CrosstermE
+@@ -653,6 +656,9 @@ pub async fn handle_terminal_events(&mut self, event: std::io::Result<CrosstermE
              jobs: &mut self.jobs,
              scroll: None,
          };
