@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 11:37:30 +0200
+Subject: [PATCH 6/6] End when the terminal's input fails or closes instead of
+ panicking
+
+Problem: when the terminal goes away while Helix runs (on AROS: the Limpet
+window is closed), the input stream yields an error (UnexpectedEof), and
+handle_terminal_events unwraps it: the editor thread panics. Other input
+errors (a failed poll or read) end the same way.
+Change: an error from the terminal's input ends the event loop, as a
+hang-up does; the terminal is restored if it can be, and Helix exits.
+Unsaved changes are lost, as with SIGHUP on other systems. An interrupted
+read (which the event stream does not pass on today) is ignored.
+Repository: helix-editor/helix
+Base: a05c151bb6e8e9c65ec390b0ae2afe7a5efd619b (tag 25.07.1)
+Author: tomaszstaniak
+Date: 2026-10-19
+Platform scope: all targets.
+Upstream status: candidate (not submitted).
+Verification: on AROS One 1.3, closing the Limpet 0.6.1 window while hx runs
+ends hx and the window closes; before, the window stayed on "Closing:
+waiting for process". Host: cargo check.
+---
+ helix-term/src/application.rs | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/helix-term/src/application.rs b/helix-term/src/application.rs
+index 40faf2fb61a8cb31cf0f15dabf4e10689016f9a2..97f8e8b4aff388d56c23bcc9cdf8fef52876c09d 100644
+--- a/helix-term/src/application.rs
++++ b/helix-term/src/application.rs
+@@ -315,7 +315,17 @@ pub async fn event_loop_until_idle<S>(&mut self, input_stream: &mut S) -> bool
+                     };
+                 }
+                 Some(event) = input_stream.next() => {
+-                    self.handle_terminal_events(event).await;
++                    // The terminal's input failed or ended (its window was
++                    // closed): end as after a hang-up instead of panicking
++                    // on the error. Only an interrupted read is retried.
++                    if let Err(err) = &event {
++                        if err.kind() != std::io::ErrorKind::Interrupted {
++                            log::info!("terminal input failed ({err}), quitting");
++                            return false;
++                        }
++                    } else {
++                        self.handle_terminal_events(event).await;
++                    }
+                 }
+                 Some(callback) = self.jobs.callbacks.recv() => {
+                     self.jobs.handle_callback(&mut self.editor, &mut self.compositor, Ok(Some(callback)));

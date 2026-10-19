@@ -30,13 +30,13 @@ Removal: when crossterm gains an AROS backend upstream.
 ---
  Cargo.toml                          |  11 +-
  src/event/source/unix.rs            |  14 +-
- src/event/source/unix/aros.rs       | 262 ++++++++++++++++++++++++++++
+ src/event/source/unix/aros.rs       | 260 ++++++++++++++++++++++++++++
  src/event/source/unix/aros_tests.rs | 100 +++++++++++
  src/event/sys/unix/waker.rs         |  14 +-
  src/event/sys/unix/waker/aros.rs    |  28 +++
  src/terminal/sys/file_descriptor.rs |  10 +-
  src/terminal/sys/unix.rs            |  61 +++++--
- 8 files changed, 473 insertions(+), 27 deletions(-)
+ 8 files changed, 471 insertions(+), 27 deletions(-)
  create mode 100644 src/event/source/unix/aros.rs
  create mode 100644 src/event/source/unix/aros_tests.rs
  create mode 100644 src/event/sys/unix/waker/aros.rs
@@ -119,10 +119,10 @@ index 84966c1ce9a1c78f767267f6fb3012d9618a3fd9..2bbfbae4a28e4c0605570547759e31c9
 +pub(crate) use self::aros::UnixInternalEventSource;
 diff --git a/src/event/source/unix/aros.rs b/src/event/source/unix/aros.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..22b874c60f0aca79c9807a45442f2c79369c36fb
+index 0000000000000000000000000000000000000000..e10c9765fd7a1b628c3db43bf43a1a1e42830710
 --- /dev/null
 +++ b/src/event/source/unix/aros.rs
-@@ -0,0 +1,262 @@
+@@ -0,0 +1,260 @@
 +//! Event source for AROS consoles.
 +//!
 +//! AROS has no select on a console and no SIGWINCH. Readiness comes from
@@ -173,12 +173,10 @@ index 0000000000000000000000000000000000000000..22b874c60f0aca79c9807a45442f2c79
 +impl Parser {
 +    fn feed(&mut self, bytes: &[u8]) -> io::Result<()> {
 +        for &byte in bytes {
++            // A sequence this long (a paste of megabytes) is dropped, not
++            // reported: an error here would end the program reading keys.
 +            if self.bytes.len() == MAX_SEQUENCE {
 +                self.bytes.clear();
-+                return Err(io::Error::new(
-+                    io::ErrorKind::InvalidData,
-+                    "terminal input sequence too long",
-+                ));
 +            }
 +            self.bytes.push(byte);
 +            if let Some(size) = resize_report(&self.bytes) {
