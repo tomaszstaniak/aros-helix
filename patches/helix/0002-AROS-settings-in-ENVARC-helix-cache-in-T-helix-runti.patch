@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
 Date: Mon, 19 Oct 2026 01:20:55 +0200
-Subject: [PATCH 2/5] AROS: settings in ENVARC:helix, cache in T:helix, runtime
+Subject: [PATCH 2/6] AROS: settings in ENVARC:helix, cache in T:helix, runtime
  in PROGDIR:
 
 Problem: AROS has no home directory unless the user sets HOME, and

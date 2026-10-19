@@ -1,1 +1,2 @@
 0001-AROS-event-source-waker-and-terminal-queries-for-ARO.patch
+0002-EventStream-pass-a-failed-poll-to-the-stream-instead.patch

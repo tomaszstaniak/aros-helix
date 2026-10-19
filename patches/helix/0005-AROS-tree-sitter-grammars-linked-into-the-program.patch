@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
 Date: Mon, 19 Oct 2026 02:19:21 +0200
-Subject: [PATCH 5/5] AROS: tree-sitter grammars linked into the program
+Subject: [PATCH 5/6] AROS: tree-sitter grammars linked into the program
 
 Problem: Helix loads grammars as shared libraries; AROS cannot load ELF
 shared objects.
