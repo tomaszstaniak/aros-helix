@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
 Date: Mon, 19 Oct 2026 01:13:37 +0200
-Subject: [PATCH 1/6] AROS: build and run without Unix-only process, signal and
+Subject: [PATCH 1/7] AROS: build and run without Unix-only process, signal and
  network support
 
 Problem: Tokio's process, net and signal features need mio, which has no

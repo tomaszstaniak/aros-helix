@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
 Date: Mon, 19 Oct 2026 01:28:25 +0200
-Subject: [PATCH 3/6] Return exit codes from main_impl instead of exiting there
+Subject: [PATCH 3/7] Return exit codes from main_impl instead of exiting there
 
 Problem: on AROS the editor runs on its own thread, and exit() from a
 thread other than the main task crashes in crt.library

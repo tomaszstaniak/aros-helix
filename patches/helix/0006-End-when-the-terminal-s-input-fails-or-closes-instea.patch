@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
 Date: Mon, 19 Oct 2026 11:37:30 +0200
-Subject: [PATCH 6/6] End when the terminal's input fails or closes instead of
+Subject: [PATCH 6/7] End when the terminal's input fails or closes instead of
  panicking
 
 Problem: when the terminal goes away while Helix runs (on AROS: the Limpet

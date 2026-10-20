@@ -1,0 +1,86 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Tue, 20 Oct 2026 19:05:04 +0200
+Subject: [PATCH 7/7] Mark each frame with synchronized output (DEC 2026)
+
+Helix writes a frame in several pieces. A terminal that draws as data
+arrives can show parts of two frames; with the frame marked it can wait
+for the end. Terminals that do not know the mode ignore it. The cursor
+moves after the frame's cells are inside the marks, so they show with it.
+---
+ helix-tui/src/backend/crossterm.rs | 10 +++++++++-
+ helix-tui/src/backend/mod.rs       | 10 ++++++++++
+ helix-tui/src/terminal.rs          |  6 +++++-
+ 3 files changed, 24 insertions(+), 2 deletions(-)
+
+diff --git a/helix-tui/src/backend/crossterm.rs b/helix-tui/src/backend/crossterm.rs
+index 28e20419b4dd8a4fd0d319ce086dfc015394bca2..50f462c444c93a1527caa5e50dae0c7ad7cd4b12 100644
+--- a/helix-tui/src/backend/crossterm.rs
++++ b/helix-tui/src/backend/crossterm.rs
+@@ -11,7 +11,7 @@
+         Attribute as CAttribute, Color as CColor, Colors, Print, SetAttribute, SetBackgroundColor,
+         SetColors, SetForegroundColor,
+     },
+-    terminal::{self, Clear, ClearType},
++    terminal::{self, BeginSynchronizedUpdate, Clear, ClearType, EndSynchronizedUpdate},
+     Command,
+ };
+ use helix_view::{
+@@ -336,6 +336,14 @@ fn size(&self) -> io::Result<Rect> {
+         Ok(Rect::new(0, 0, width, height))
+     }
+ 
++    fn begin_frame(&mut self) -> io::Result<()> {
++        queue!(self.buffer, BeginSynchronizedUpdate)
++    }
++
++    fn end_frame(&mut self) -> io::Result<()> {
++        queue!(self.buffer, EndSynchronizedUpdate)
++    }
++
+     fn flush(&mut self) -> io::Result<()> {
+         self.buffer.flush()
+     }
+diff --git a/helix-tui/src/backend/mod.rs b/helix-tui/src/backend/mod.rs
+index d8b0555cbedc17f6d2166f5d84583e8c2e579b25..7b62025682100b64333aa0c57bc344f951bf4658 100644
+--- a/helix-tui/src/backend/mod.rs
++++ b/helix-tui/src/backend/mod.rs
+@@ -42,4 +42,14 @@ fn draw<'a, I>(&mut self, content: I) -> Result<(), io::Error>
+     fn size(&self) -> Result<Rect, io::Error>;
+     /// Flushes the terminal buffer
+     fn flush(&mut self) -> Result<(), io::Error>;
++    /// Marks the start of a frame (synchronized output, DEC 2026), so the
++    /// terminal can show the frame whole instead of as it arrives. Terminals
++    /// that do not know the mode ignore it.
++    fn begin_frame(&mut self) -> Result<(), io::Error> {
++        Ok(())
++    }
++    /// Marks the end of a frame started with `begin_frame`.
++    fn end_frame(&mut self) -> Result<(), io::Error> {
++        Ok(())
++    }
+ }
+diff --git a/helix-tui/src/terminal.rs b/helix-tui/src/terminal.rs
+index 969b285cd5394c1f26c364e5ef582f73633d94ac..714e82d3bb543a1defb16bf8fbb3a44210b366b2 100644
+--- a/helix-tui/src/terminal.rs
++++ b/helix-tui/src/terminal.rs
+@@ -180,7 +180,9 @@ pub fn draw(
+         // // Terminal. Thus, we're taking the important data out of the Frame and dropping it.
+         // let cursor_position = frame.cursor_position;
+ 
+-        // Draw to stdout
++        // Draw to stdout, marked as one frame: the cursor moves below belong
++        // to it too, so the terminal never shows the frame without them.
++        self.backend.begin_frame()?;
+         self.flush()?;
+ 
+         if let Some((x, y)) = cursor_position {
+@@ -192,6 +194,8 @@ pub fn draw(
+             kind => self.show_cursor(kind)?,
+         }
+ 
++        self.backend.end_frame()?;
++
+         // Swap buffers
+         self.buffers[1 - self.current].reset();
+         self.current = 1 - self.current;

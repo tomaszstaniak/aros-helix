@@ -4,3 +4,4 @@
 0004-AROS-volume-and-assign-paths-are-absolute-also-in-fi.patch
 0005-AROS-tree-sitter-grammars-linked-into-the-program.patch
 0006-End-when-the-terminal-s-input-fails-or-closes-instea.patch
+0007-Mark-each-frame-with-synchronized-output-DEC-2026.patch
