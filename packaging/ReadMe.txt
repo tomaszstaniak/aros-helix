@@ -1,5 +1,5 @@
-Helix 25.07.1 for AROS x86_64 (ABIv11), preview 1
-=================================================
+Helix 25.07.1 for AROS x86_64 (ABIv11), preview 2 test 1
+==========================================================
 
 Helix is a modal text editor (https://helix-editor.com). This is a preview
 of a native AROS build of the Helix 25.07.1 release, for AROS One and other
@@ -9,7 +9,9 @@ copies of.
 Requirements
 ------------
 - Limpet 0.6.1 or later. Start Helix in a Limpet window: the AROS console
-  (CON:) does not understand the terminal sequences Helix uses.
+  (CON:) does not understand the terminal sequences Helix uses. With
+  Limpet 0.6.2-test1 or later, scrolling no longer shows lines of two
+  screens at once.
 - About 45 MB of disk space.
 
 Installing

@@ -468,7 +468,7 @@ def cmd_build(args):
     print(json.dumps(record, indent=2))
 
 
-PACKAGE_VERSION = "25.07.1-aros-preview1"
+PACKAGE_VERSION = "25.07.1-aros-preview2-test1"
 
 
 def cmd_package(args):
