@@ -620,6 +620,9 @@ def cmd_build(args):
     flags = ["-Cpanic=" + panic, "--cfg", 'getrandom_backend="custom"', "--cfg", "tokio_unstable",
              f"--remap-path-prefix={src}=/helix", f"--remap-path-prefix={cfg['cargo_home']}=/cargo",
              f"--remap-path-prefix={libc}=/libc-aros", f"--remap-path-prefix={sysroot}=/rust",
+             # Patched crates are staged under the build root; without this their
+             # host paths end up in panic locations.
+             f"--remap-path-prefix={root / 'crates'}=/crates",
              # One section per function gives hx about 12 000 loadable sections, and
              # AROS keeps them as that many segments. ABIv11 debug.library lists a
              # loaded module before building its segment array; a task that ends
@@ -659,7 +662,9 @@ def cmd_build(args):
                CC_x86_64_aros=cfg["aros_gcc"], AR_x86_64_aros=cfg["aros_ar"],
                # The cc crate asks for PIC; AROS executables are static, and PIC
                # objects reference a _GLOBAL_OFFSET_TABLE_ the link never has.
-               CFLAGS_x86_64_aros=f"--sysroot={cfg['aros_sdk']} -fno-PIC")
+               # -ffile-prefix-map: C assertions name their source file; no host path.
+               CFLAGS_x86_64_aros=f"--sysroot={cfg['aros_sdk']} -fno-PIC -ffile-prefix-map={root}=/build "
+                                  f"-ffile-prefix-map={cfg['cargo_home']}=/cargo")
     cargo = ["cargo", "+" + cfg["toolchain"]]
     # The lock pins upstream libc 0.2.174; the AROS libc is 0.2.189.
     run(cargo + ["update", "--offline", "-p", "libc@0.2.174", "--precise", "0.2.189"] + patch,
