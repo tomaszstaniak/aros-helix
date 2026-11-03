@@ -642,7 +642,8 @@ README_FIELDS = {
 
 def cmd_package(args):
     """Packs the last build as candidate N: dist/unreleased/Helix-<version>-candidate<N>-<target>.zip.
-    Only `promote` puts an archive into dist/ and its SHA256SUMS. Nothing is replaced."""
+    --unstripped packs the same linked binary without stripping it (for diagnosis; never
+    promoted). Only `promote` puts an archive into dist/ and its SHA256SUMS. Nothing is replaced."""
     cfg = config(["aros_gcc"], args.target)
     root = Path(cfg["build_root"])
     record = json.loads((root / "build.json").read_text())
@@ -656,16 +657,21 @@ def cmd_package(args):
     if record.get("sdk_layout", "skipped") == "skipped":
         raise Failure("this build did not pass the ABI layout gate; it is for diagnosis only")
     dist = REPO / "dist" / "unreleased"
-    name = f"Helix-{PACKAGE_VERSION}-candidate{args.candidate}-{args.target}"
+    variant = "-unstripped" if args.unstripped else ""
+    name = f"Helix-{PACKAGE_VERSION}-candidate{args.candidate}{variant}-{args.target}"
     archive = dist / f"{name}.zip"
     if archive.exists():
         raise Failure(f"{archive} exists; delivered archives are never replaced")
     with tempfile.TemporaryDirectory(prefix="hx-package-") as tmp:
         top = Path(tmp) / "Helix"
         (top / "runtime").mkdir(parents=True)
-        # The full strip leaves a file AROS loads without its relocations.
-        run([cfg["aros_gcc"].replace("-gcc", "-strip"), "--strip-unneeded", "--remove-section", ".comment",
-             "-o", top / "hx", binary])
+        if args.unstripped:
+            # Diagnostic variant: the linked file itself, with its symbols.
+            shutil.copyfile(binary, top / "hx")
+        else:
+            # The full strip leaves a file AROS loads without its relocations.
+            run([cfg["aros_gcc"].replace("-gcc", "-strip"), "--strip-unneeded", "--remove-section", ".comment",
+                 "-o", top / "hx", binary])
         # UnZip restores these bits on AROS; without x the file has no `e` bit.
         (top / "hx").chmod(0o755)
         runtime = WORK / "helix" / "runtime"
@@ -695,19 +701,41 @@ def cmd_package(args):
 
 def cmd_promote(args):
     """Copies an accepted candidate unchanged to dist/Helix-<version>-<target>.zip and
-    adds it to dist/SHA256SUMS. Run it only after native acceptance of that archive."""
+    adds it to dist/SHA256SUMS. --accepted names the native acceptance record; it must
+    state the archive's SHA-256. The archive's files are checked against its contents list."""
     unreleased = REPO / "dist" / "unreleased"
     source = unreleased / f"Helix-{PACKAGE_VERSION}-candidate{args.candidate}-{args.target}.zip"
+    listing = source.with_name(source.name[:-4] + ".contents.sha256")
     listed = (unreleased / f"SHA256SUMS-{PACKAGE_VERSION}").read_text().split("\n")
     digest = sha256_file(source)
     if f"{digest}  {source.name}" not in listed:
         raise Failure(f"{source.name} does not match its line in SHA256SUMS-{PACKAGE_VERSION}")
+    if digest not in Path(args.accepted).read_text():
+        raise Failure(f"{args.accepted} does not name {source.name}'s SHA-256 {digest}")
+    with tempfile.TemporaryDirectory(prefix="hx-promote-") as tmp:
+        run(["unzip", "-q", source, "-d", tmp])
+        found = sorted(p for p in Path(tmp).rglob("*") if p.is_file())
+        actual = "".join(f"{sha256_file(p)}  {p.relative_to(tmp).as_posix()}\n" for p in found)
+        if actual != listing.read_text():
+            raise Failure(f"{source.name}'s files do not match {listing.name}")
     name = f"Helix-{PACKAGE_VERSION}-{args.target}"
     archive, contents = REPO / "dist" / f"{name}.zip", REPO / "dist" / f"{name}.contents.sha256"
     if archive.exists() or contents.exists():
         raise Failure(f"{archive} exists; delivered archives are never replaced")
-    shutil.copyfile(source, archive)
-    shutil.copyfile(source.with_name(source.name[:-4] + ".contents.sha256"), contents)
+    # Staged: both files are written under temporary names first, so a failed copy
+    # leaves nothing that blocks a retry; SHA256SUMS is written last.
+    staged = [(source, archive.with_name("." + archive.name + ".part")),
+              (listing, contents.with_name("." + contents.name + ".part"))]
+    try:
+        for src, part in staged:
+            shutil.copyfile(src, part)
+        if sha256_file(staged[0][1]) != digest:
+            raise Failure(f"the copy of {source.name} differs from the candidate")
+        for (_, part), final in zip(staged, (archive, contents)):
+            os.replace(part, final)
+    finally:
+        for _, part in staged:
+            part.unlink(missing_ok=True)
     with open(REPO / "dist" / "SHA256SUMS", "a") as sums:
         sums.write(f"{digest}  {archive.name}\n")
     print(archive)
@@ -732,6 +760,12 @@ def main():
             sp.add_argument("--target", choices=sorted(TARGETS), default=DEFAULT_TARGET)
         if name in ("package", "promote"):
             sp.add_argument("--candidate", type=int, required=True, help="candidate number")
+        if name == "package":
+            sp.add_argument("--unstripped", action="store_true",
+                            help="pack the linked binary unstripped (diagnostic variant)")
+        if name == "promote":
+            sp.add_argument("--accepted", required=True,
+                            help="acceptance record that states the archive's SHA-256")
         if name == "build":
             # Unwind (the default): a panic on the editor thread can then end the
             # program from the main task; AROS cannot abort() from a thread cleanly.
