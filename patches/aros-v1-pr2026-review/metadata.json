@@ -2,16 +2,18 @@
   "id": "aros-pr2026-codacy-review",
   "upstream": "https://github.com/aros-development-team/AROS",
   "base": "13a018a8e48ff68837e934cfe560554a921f3e5f",
-  "status": "candidate",
+  "status": "upstream",
   "v1_applicability": "Review follow-up for existing mainline PR; preserves production behavior and fixes test integration/readability where applicable.",
   "checked_upstream": "13a018a8e48ff68837e934cfe560554a921f3e5f",
   "checked_date": "2026-11-03",
-  "validation": "GCC10.5 actual affected target builds/links: 3 successful combinations. Targets: exec_closed_stdin, stdio_closed. Pre-existing v11 private-header exclusions: stdio_closed (libraries/posixc.h absent; original source fails identically). Original custom target fails on missing test.h; restored USER_INCLUDES makes it build. Actual stdio host test (eight masks) and Ruff D205/D213 pass. No guest runtime repeated.",
+  "validation": "GCC10.5 actual affected target builds/links: 3 successful combinations. Targets: exec_closed_stdin, stdio_closed. Pre-existing v11 private-header exclusions: stdio_closed (libraries/posixc.h absent; original source fails identically). Original custom target fails on missing test.h; restored USER_INCLUDES makes it build. Actual stdio host test (eight masks) and Ruff D205/D213 pass. No guest runtime repeated. Single-line docstrings satisfy both D212 and D213 (checked separately with D205); the host regression passes again.",
   "related_submission": "https://github.com/aros-development-team/AROS/pull/2026",
-  "next_action": "Publish saved follow-up on existing PR2026; keep current readiness and qualification limits.",
+  "next_action": "Publish saved single-line docstring correction; retain existing scoped build/runtime limits.",
   "review_source_sha256": {
     "developer/debug/test/crt/posixc/exec_closed_stdin.c": "6d14b6dc0861c1d103f6c970f8bb107c4fba9a3d566d5d94f5482d7403966a92",
     "developer/debug/test/crt/posixc/mmakefile.src": "1a2a9bf2b2c950f3fe35f79c99d5c486e093ad228239e53e893487510d6857ec",
-    "developer/debug/test/crt/posixc/test_stdio_init.py": "90f8f1e5e85f9f41d88fe4425b84ab07b0bbba19b2b60aaf51727d1d9b23dfd8"
-  }
+    "developer/debug/test/crt/posixc/test_stdio_init.py": "70648b5dbfc739ce66efa99abaec585e342bddf9fb508571d4b0fd1464e11edb"
+  },
+  "submission_url": "https://github.com/aros-development-team/AROS/pull/2026",
+  "submission_revision": "4a42c29c1dca154c42d6603709f1f8bb8b26c25e"
 }

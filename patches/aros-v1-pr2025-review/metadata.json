@@ -2,17 +2,19 @@
   "id": "aros-pr2025-codacy-review",
   "upstream": "https://github.com/aros-development-team/AROS",
   "base": "f7ad104f8fcd379218ec322308d7dbf464b2ae25",
-  "status": "candidate",
+  "status": "upstream",
   "v1_applicability": "Review follow-up for existing mainline PR; preserves production behavior and fixes test integration/readability where applicable.",
   "checked_upstream": "f7ad104f8fcd379218ec322308d7dbf464b2ae25",
   "checked_date": "2026-11-03",
-  "validation": "GCC10.5 actual affected target builds/links: 7 successful combinations. Targets: close_pipe_progress, vfork_context, vfork_fd, vfork_fd_thread. Pre-existing v11 private-header exclusions: vfork_context (libraries/posixc.h absent; original source fails identically). Original custom target fails on missing test.h; restored USER_INCLUDES makes it build. Actual-helper host test and Ruff D205/D213 pass. No guest runtime repeated.",
+  "validation": "GCC10.5 actual affected target builds/links: 7 successful combinations. Targets: close_pipe_progress, vfork_context, vfork_fd, vfork_fd_thread. Pre-existing v11 private-header exclusions: vfork_context (libraries/posixc.h absent; original source fails identically). Original custom target fails on missing test.h; restored USER_INCLUDES makes it build. Actual-helper host test and Ruff D205/D213 pass. No guest runtime repeated. Single-line docstrings satisfy both D212 and D213 (checked separately with D205); the host regression passes again.",
   "related_submission": "https://github.com/aros-development-team/AROS/pull/2025",
-  "next_action": "Publish saved follow-up on existing PR2025; keep current readiness and qualification limits.",
+  "next_action": "Publish saved single-line docstring correction; retain existing scoped build/runtime limits.",
   "review_source_sha256": {
     "developer/debug/test/crt/posixc/mmakefile.src": "69b784021dae2ac9dcaa452478ca3a872736fcbf9507ed383972f68e62f5b4df",
-    "developer/debug/test/crt/posixc/test_atomic_dup.py": "c3012584cf6c009a385f00888de35a1c7cdb0bb4a5a5c9e4943aad101e88e5ab",
+    "developer/debug/test/crt/posixc/test_atomic_dup.py": "b586cf3ba4934d0b470bad2a00143b55cffaef3d894f4a4cff0b560ab7d58c5b",
     "developer/debug/test/crt/posixc/vfork_context.c": "38707b449023177267140e357dcafde08de6ade61f04b71bb41c6a5b5783e6d7",
     "developer/debug/test/crt/posixc/vfork_fd.c": "68c990cd4e2d532e6125ceafdb50d089137618e46eb30f93b034aa145a839593"
-  }
+  },
+  "submission_url": "https://github.com/aros-development-team/AROS/pull/2025",
+  "submission_revision": "744b3c1585e871ae3cbc78660e791006fea8d732"
 }
