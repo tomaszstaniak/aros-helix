@@ -15,6 +15,10 @@
 //!                          four reads start together, and the end line counts the
 //!                          rounds in which all four were in progress at once
 //!
+//!   thread-probe unw       the unwinder without a panic: _Unwind_Find_FDE for this
+//!                          function, then _Unwind_Backtrace printing every frame's IP
+//!                          and the end code (5 = end of stack is the normal end)
+//!
 //! Each step prints a line before and after, so the last line shows where it
 //! stopped, and every round prints its result (fsm: failed rounds and every 25th). Any failed step (spawn, join,
 //! read, a nested task, a panic that was not caught) makes the exit status 10;
@@ -34,6 +38,41 @@ fn catch() -> bool {
     let r = std::panic::catch_unwind(|| panic!("deliberate"));
     say(&format!("catch: after, caught = {}", r.is_err()));
     r.is_err()
+}
+
+#[allow(non_upper_case_globals)]
+extern "C" {
+    fn _Unwind_Backtrace(
+        trace: extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void) -> i32,
+        arg: *mut std::ffi::c_void,
+    ) -> i32;
+    fn _Unwind_GetIP(ctx: *mut std::ffi::c_void) -> usize;
+    fn _Unwind_Find_FDE(pc: *mut std::ffi::c_void, bases: *mut [usize; 3]) -> *const std::ffi::c_void;
+    static __eh_frame_start: u8;
+}
+
+extern "C" fn frame(ctx: *mut std::ffi::c_void, arg: *mut std::ffi::c_void) -> i32 {
+    let n = unsafe { &mut *(arg as *mut usize) };
+    say(&format!("unw: frame {n}: ip {:#x}", unsafe { _Unwind_GetIP(ctx) }));
+    *n += 1;
+    if *n >= 64 { 4 } else { 0 } // 4 = _URC_NORMAL_STOP, 0 = _URC_NO_REASON
+}
+
+/// Walks the unwinder's own steps, each announced first, so the last line shows
+/// which one ended the program. True when the walk ended normally with frames.
+#[inline(never)]
+fn unw() -> bool {
+    let pc = unw as usize;
+    say(&format!("unw: eh_frame at {:#x}, this function at {pc:#x}", unsafe { &__eh_frame_start } as *const u8 as usize));
+    say("unw: find_fde: before");
+    let mut bases = [0usize; 3];
+    let fde = unsafe { _Unwind_Find_FDE((pc + 1) as *mut _, &mut bases) };
+    say(&format!("unw: find_fde: after, fde {fde:p}, bases {bases:#x?}"));
+    say("unw: backtrace: before");
+    let mut n = 0usize;
+    let code = unsafe { _Unwind_Backtrace(frame, &mut n as *mut usize as *mut _) };
+    say(&format!("unw: backtrace: after, code {code}, frames {n}"));
+    !fde.is_null() && n > 0 && (code == 5 || code == 4)
 }
 
 fn file_and_rounds(default: u64) -> Result<(String, u64), String> {
@@ -80,6 +119,7 @@ fn main() {
             }
         }
         "catch" => check(catch(), "panic caught on the main task"),
+        "unw" => check(unw(), "unwinder walked the stack"),
         "tokio" => {
             let (file, rounds) = match file_and_rounds(3) {
                 Ok(v) => v,
@@ -253,6 +293,6 @@ fn main() {
 }
 
 fn usage(why: &str) -> ! {
-    say(&format!("{why}; modes: spawn, catch, tcatch, fs FILE N, fsc FILE N, tokio FILE N, fsm DIR N"));
+    say(&format!("{why}; modes: spawn, catch, tcatch, unw, fs FILE N, fsc FILE N, tokio FILE N, fsm DIR N"));
     std::process::exit(20);
 }

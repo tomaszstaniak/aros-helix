@@ -114,3 +114,27 @@ so it cannot show the absence of the window. Builds since then use
 `-Zfunction-sections=no` (7 loadable sections); that shortens the window but
 does not close it: `CRASH` with such a build also failed, on a module of 6
 segments.
+
+## conprobe
+
+Question: which console access pattern raises "unexpected DOS packet received"
+(seen at hx's `:q` on mainline)? Run: `conprobe ONE|WORKER|PENDING N LOG`
+(see the source): the Shell's own task in raw mode with WaitForChar, a second
+process doing the same on the shared handles while the first writes, and mode
+changes and writes while another process waits in WaitForChar. Every call is
+recorded in memory with task, reply port, handle and handler port and written
+to LOG at the end.
+Found (2026-11-03, v1-2, older v1 base): all three pass in CON: and in Limpet
+0.9.0, no alert. Not yet run on nightly 20261031, where hx raised it.
+
+## cxx-exc and thread-probe unw
+
+Question: why does no panic unwind on mainline? `exc.cpp` is a C++ throw and
+catch; `thread-probe unw` calls `_Unwind_Find_FDE` and `_Unwind_Backtrace`.
+Found (2026-11-03): with the mainline GCC 10.5 toolchain of 2026-09-02 both
+abort (C++ after the throw; `_Unwind_Backtrace` before its first frame), in the
+small and the large code model; `_Unwind_Find_FDE` works. That toolchain's
+libgcc never fills `dwarf_reg_size_table` (AROS fixed its GCC patch in
+52bab89955, 2026-09-13). `hx.py build` now links libgcc's `unwind-dw2.o`
+rebuilt without that guard for ABIv1 (`build_unwind_fix`); with it C++ catches,
+the backtrace walks 7 frames, and `catch` and `tcatch` catch the panic.

@@ -49,11 +49,14 @@ GRAMMARS = {"rust": "tree-sitter-rust"}
 #               libpthread.a (old ABIv11 SDK); "sdk": the SDK's library as is
 #   wctype_shim the SDK lacks iswalnum and friends (ABIv11); mainline has them inline
 #   panic       default panic strategy
+#   unwind_fix  rebuild libgcc's unwind-dw2.o without the guard that AROS's GCC 10.5
+#               patch had before AROS 52bab89955 (2026-09-13), when the toolchain's
+#               object lacks it (see build_unwind_fix)
 TARGETS = {
     "aros-x86_64-abiv11-pc": {"abi_byte": 11, "spec": "x86_64-aros.json.in", "pthread": "patched",
-                              "wctype_shim": True, "panic": "unwind"},
+                              "wctype_shim": True, "panic": "unwind", "unwind_fix": False},
     "aros-x86_64-abiv1-pc": {"abi_byte": 1, "spec": "profiles/x86_64-v1-pc.json", "pthread": "sdk",
-                             "wctype_shim": False, "panic": "unwind"},
+                             "wctype_shim": False, "panic": "unwind", "unwind_fix": True},
 }
 DEFAULT_TARGET = "aros-x86_64-abiv11-pc"
 
@@ -71,6 +74,8 @@ SETTINGS = {
     "rustc_version": ("HX_RUSTC_VERSION", "rustc 1.100.0-nightly (0dfb098f3 2026-08-31)",
                       "exact `rustc --version` the toolchain must report"),
     "cargo_home": ("HX_CARGO_HOME", str(Path.home() / ".cargo"), "CARGO_HOME holding the registry cache"),
+    "gcc_build": ("HX_GCC_BUILD", None, "host build directory of the AROS GCC that made aros_gcc "
+                  "(<AROS build>/bin/<host>); read-only, for the unwinder fix (ABIv1)"),
     "build_root": ("HX_BUILD_ROOT", None, "build outputs (relative: to the repository); default build/<target>"),
 }
 # local.json may hold {"targets": {"<target>": {<settings>}}}: those values
@@ -271,6 +276,73 @@ def stage_tree(repo, dest):
     dest.mkdir(parents=True)
     with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
         tar.extractall(dest, filter="data")
+
+
+def build_unwind_fix(cfg, root):
+    """libgcc's unwind-dw2.o with dwarf_reg_size_table filled in. AROS's GCC 10.5 patch
+    put __builtin_init_dwarf_reg_size_table() under MD_FALLBACK_FRAME_STATE_FOR until
+    AROS 52bab89955 (2026-09-13); toolchains built before it leave the table zeroed, and
+    the first unwind (a Rust panic, a C++ throw, _Unwind_Backtrace) aborts in
+    uw_init_context. Returns None when the toolchain's own object already has the table.
+    Otherwise compiles the GCC build tree's unwind-dw2.c twice with the libgcc recipe:
+    unchanged, which must disassemble like the toolchain's object, and without the
+    guard, which is the object linked ahead of libgcc. Same fix as aros-svg-icons
+    scripts/build-unwind-fix-v1.sh."""
+    gcc, ar = cfg["aros_gcc"], cfg["aros_ar"]
+    nm, objdump = gcc.replace("-gcc", "-nm"), gcc.replace("-gcc", "-objdump")
+    libgcc = run([gcc, "-print-libgcc-file-name"]).stdout.decode().strip()
+
+    def disassembly(obj):
+        text = run([objdump, "-d", "-r", "--no-show-raw-insn", obj]).stdout
+        return hashlib.sha256(text.decode().split("\n", 4)[-1].encode()).hexdigest()
+
+    with tempfile.TemporaryDirectory(prefix="unwind-", dir=root) as tmp:
+        tmp = Path(tmp)
+        run([ar, "x", libgcc, "unwind-dw2.o"], cwd=tmp)
+        stock = tmp / "unwind-dw2.o"
+        if " dwarf_reg_size_table\n" in run([nm, stock]).stdout.decode():
+            return None
+        if not cfg.get("gcc_build"):
+            raise Failure(f"{libgcc}'s unwinder never fills its register size table, so every "
+                          "panic aborts; set gcc_build (HX_GCC_BUILD) to that toolchain's GCC build tree")
+        build = Path(cfg["gcc_build"])
+        g = build / "gen/host/tools/crosstools/gnu/gcc"
+        source = build / "Ports/host/gcc/gcc-10.5.0/libgcc/unwind-dw2.c"
+        toolchain = Path(gcc).parent
+        inputs = {"source": sha256_file(source), "stock": disassembly(stock), "xgcc": sha256_file(g / "gcc/xgcc"),
+                  "sdk": cfg["aros_sdk"]}
+        key = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()[:16]
+        out = root / f"unwind-fix-{key}"
+        if (out / "unwind.json").exists():
+            record = json.loads((out / "unwind.json").read_text())
+            if record["inputs"] != inputs or sha256_file(out / "unwind-dw2.o") != record["object"]:
+                raise Failure(f"changed unwinder cache {out}; keep it for inspection, use a new build root")
+            return out / "unwind-dw2.o"
+        text = source.read_text()
+        guard = "#ifdef MD_FALLBACK_FRAME_STATE_FOR\n  __builtin_init_dwarf_reg_size_table (dwarf_reg_size_table);\n#endif\n"
+        if text.count(guard) != 1:
+            raise Failure(f"{source}: the guarded table initialisation is not there once")
+        (tmp / "fixed.c").write_text(text.replace(guard, "  __builtin_init_dwarf_reg_size_table (dwarf_reg_size_table);\n"))
+        # The recipe of the toolchain's libgcc build (its libgcc build directory as cwd).
+        command = [g / "gcc/xgcc", f"-B{g}/gcc/", f"-B{toolchain}/x86_64-aros/bin/", f"-B{toolchain}/x86_64-aros/lib/",
+                   f"--sysroot={cfg['aros_sdk']}", "-isystem", f"{cfg['aros_sdk']}/include",
+                   "-mcmodel=large", "-O2", "-DIN_GCC", "-DCROSS_DIRECTORY_STRUCTURE", "-isystem", "./include",
+                   "-DIN_LIBGCC2", "-fbuilding-libgcc", "-fno-stack-protector", "-I.", "-I../.././gcc",
+                   f"-I{source.parent}", f"-I{source.parent}/../gcc", f"-I{source.parent}/../include",
+                   "-fexceptions", "-fvisibility=hidden", "-DHIDE_EXPORTS", "-c"]
+        cwd = g / "x86_64-aros/libgcc"
+        run(command + [source, "-o", tmp / "rebuilt.o"], cwd=cwd)
+        if disassembly(tmp / "rebuilt.o") != inputs["stock"]:
+            raise Failure(f"unwind-dw2.c from {build} does not rebuild {libgcc}'s object; wrong gcc_build?")
+        run(command + [tmp / "fixed.c", "-o", tmp / "unwind-dw2.o.fixed"], cwd=cwd)
+        if " dwarf_reg_size_table\n" not in run([nm, tmp / "unwind-dw2.o.fixed"]).stdout.decode():
+            raise Failure("the rebuilt unwinder still has no register size table")
+        staging = Path(tempfile.mkdtemp(prefix="unwind-fix-", dir=root))
+        shutil.copyfile(tmp / "unwind-dw2.o.fixed", staging / "unwind-dw2.o")
+        (staging / "unwind.json").write_text(json.dumps(
+            {"inputs": inputs, "object": sha256_file(staging / "unwind-dw2.o")}, indent=2) + "\n")
+        staging.rename(out)
+    return out / "unwind-dw2.o"
 
 
 def build_pthread(cfg, root):
@@ -540,6 +612,7 @@ def cmd_build(args):
         stage_tree(WORK / "crates" / ident, dest)
         crates[spec["name"]] = dest
     pthread = build_pthread(cfg, root) if info["pthread"] == "patched" else None
+    unwind_fix = build_unwind_fix(cfg, root) if info["unwind_fix"] else None
     grammars = build_grammars(cfg, root)
 
     sysroot = run(["rustc", "+" + cfg["toolchain"], "--print", "sysroot"]).stdout.decode().strip()
@@ -559,8 +632,17 @@ def cmd_build(args):
     # pthread_create.o, so -lpthread pulls neither.
     if panic == "unwind":
         flags.append("-Cforce-unwind-tables=yes")
-    if pthread:
-        flags.append("-Zpre-link-args=" + " ".join(str(pthread / f"{n}.o") for n in PTHREAD_PATCHED))
+    # Objects linked ahead of the libraries: they define every symbol of the archive
+    # member they replace, so that member is never pulled.
+    pre_link = [str(pthread / f"{n}.o") for n in PTHREAD_PATCHED] if pthread else []
+    if unwind_fix:
+        pre_link.append(str(unwind_fix))
+    if pre_link:
+        flags.append("-Zpre-link-args=" + " ".join(pre_link))
+    if args.probe_flag:
+        if not args.probe:
+            raise Failure("--probe-flag applies to --probe builds only")
+        flags += args.probe_flag
     if not args.probe:
         # helix-loader refers to tree_sitter_<name> for each grammar in GRAMMARS.
         flags.append(f"-Clink-arg={grammars}")
@@ -628,7 +710,8 @@ def cmd_build(args):
               "sdk_libraries": {n: sha256_file(sdk / "lib" / n) for n in ("libpthread.a", "libposixc.a", "libstdc.a")
                                 if (sdk / "lib" / n).exists()},
               "crates": {n: tree_hash(p) for n, p in crates.items()}, "libc": tree_hash(libc),
-              "pthread": pthread.name if pthread else "SDK libpthread.a", "grammars": sha256_file(grammars),
+              "pthread": pthread.name if pthread else "SDK libpthread.a",
+              "unwinder": sha256_file(unwind_fix) if unwind_fix else "toolchain libgcc", "grammars": sha256_file(grammars),
               "target_json": sha256_file(target_json), "sdk_layout": sdk_layout,
               "binary": str(binary), "sha256": sha256_file(binary), "size": binary.stat().st_size}
     (root / "build.json").write_text(json.dumps(record, indent=2) + "\n")
@@ -858,6 +941,8 @@ def main():
             # program from the main task; AROS cannot abort() from a thread cleanly.
             sp.add_argument("--panic", choices=("unwind", "abort"), default=None)
             sp.add_argument("--probe", help="build experiments/<PROBE> instead of hx")
+            sp.add_argument("--probe-flag", action="append", default=[],
+                            help="extra rustc flag for a --probe build, e.g. -Ccode-model=small (diagnosis)")
             sp.add_argument("--no-abi-gate", action="store_true",
                             help="skip the layout gate (diagnostic rebuilds only; not packaged)")
     args = p.parse_args()
