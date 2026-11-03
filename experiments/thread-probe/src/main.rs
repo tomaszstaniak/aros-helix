@@ -9,9 +9,12 @@
 //!   thread-probe tokio FILE N  as Helix: a multi-thread Tokio runtime on a 16 MiB
 //!                          thread; N rounds of tokio::fs::read, each followed by
 //!                          12 s idle so the blocking-pool thread ends on its own
+//!   thread-probe fsm DIR N  N rounds of four threads at a time, thread i reading its
+//!                          own DIR/i.txt (i = 0..3, different contents); each read must
+//!                          return the bytes that file had when read serially
 //!
 //! Each step prints a line before and after, so the last line shows where it
-//! stopped, and every round prints its result. Any failed step (spawn, join,
+//! stopped, and every round prints its result (fsm: failed rounds and every 25th). Any failed step (spawn, join,
 //! read, a nested task, a panic that was not caught) makes the exit status 10;
 //! an unknown mode or bad arguments give 20. The last line before "main end"
 //! is "result: ok" or "result: N failed".
@@ -149,6 +152,52 @@ fn main() {
                 failed += results.iter().filter(|r| r.is_err()).count() as u64;
             }
         }
+        "fsm" => {
+            // Four threads at a time, each reading its own file DIR/0.txt..3.txt;
+            // every read must return that file's bytes as read serially first.
+            let (dir, rounds) = match file_and_rounds(20) {
+                Ok(v) => v,
+                Err(e) => usage(&e),
+            };
+            let sep = if dir.ends_with(':') || dir.ends_with('/') { "" } else { "/" };
+            let paths: Vec<String> = (0..4).map(|i| format!("{dir}{sep}{i}.txt")).collect();
+            let mut expected = Vec::new();
+            for p in &paths {
+                match std::fs::read(p) {
+                    Ok(d) => expected.push(d),
+                    Err(e) => usage(&format!("{p}: {e}")),
+                }
+            }
+            let expected = std::sync::Arc::new(expected);
+            for round in 0..rounds {
+                let handles: Vec<_> = (0..4)
+                    .map(|i| {
+                        let (path, expected) = (paths[i].clone(), expected.clone());
+                        std::thread::Builder::new().spawn(move || match std::fs::read(&path) {
+                            Err(e) => Err(format!("{i}: read: {e}")),
+                            Ok(d) if d != expected[i] => {
+                                let other = expected.iter().position(|x| *x == d);
+                                Err(format!("{i}: wrong bytes ({} bytes, same as file {other:?})", d.len()))
+                            }
+                            Ok(d) => Ok(d.len()),
+                        })
+                    })
+                    .collect();
+                let mut results = Vec::new();
+                for h in handles {
+                    results.push(match h {
+                        Err(e) => Err(format!("spawn: {e}")),
+                        Ok(h) => h.join().unwrap_or_else(|_| Err("join: thread panicked".into())),
+                    });
+                }
+                let ok = results.iter().all(|r| r.is_ok());
+                if !ok || round % 25 == 24 {
+                    say(&format!("{} round {round}: {results:?}", if ok { "ok" } else { "FAIL" }));
+                }
+                failed += results.iter().filter(|r| r.is_err()).count() as u64;
+            }
+            say(&format!("rounds done: {rounds}"));
+        }
         _ => usage(&format!("unknown mode {mode:?}")),
     }
     say(&if failed == 0 { "result: ok".to_string() } else { format!("result: {failed} failed") });
@@ -157,6 +206,6 @@ fn main() {
 }
 
 fn usage(why: &str) -> ! {
-    say(&format!("{why}; modes: spawn, catch, tcatch, fs FILE N, fsc FILE N, tokio FILE N"));
+    say(&format!("{why}; modes: spawn, catch, tcatch, fs FILE N, fsc FILE N, tokio FILE N, fsm DIR N"));
     std::process::exit(20);
 }
