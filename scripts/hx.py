@@ -705,10 +705,70 @@ def cmd_package(args):
     print(archive)
 
 
+# Scenarios a native acceptance must pass before a candidate is promoted (both targets).
+# LSP and forced stop of child programs are outside preview 2.
+ACCEPTANCE_SCENARIOS = (
+    "edit-save",          # typing, Unicode, spaces, :w, file bytes checked on the host
+    "macros",             # record and replay
+    "split",              # split windows, switching, closing one
+    "refusals",           # :sh, :pipe and a formatter refuse without starting anything
+    "protected-file",     # writing a protected file reports the error, the buffer stays
+    "unsaved-quit",       # :q refuses with changes, :q! ends
+    "resize",             # window resize redraws
+    "window-close",       # closing the Limpet window ends hx
+    "repeated-sessions",  # several hx sessions in one boot, documents on SYS: and in RAM:
+    "clean-exit",         # hx and Limpet return 0, no process left, no system alert
+)
+ACCEPTANCE_ABI = {"aros-x86_64-abiv11-pc": "v11", "aros-x86_64-abiv1-pc": "v1"}
+
+
+def check_acceptance(path, source, digest, target):
+    """The acceptance record is JSON:
+        {"schema": "helix-acceptance-1", "artifact": "<candidate zip name>", "sha256": "<its digest>",
+         "target": "<target>", "outcome": "pass",
+         "scenarios": {"<name>": {"outcome": "pass", "report": "<REPORT.json, relative to the record>"}}}
+    Every scenario in ACCEPTANCE_SCENARIOS must pass, and each named run report
+    (aros-vm-runs REPORT.json) must have passed on the target's ABI with this archive
+    among its inputs. Anything else, including an unknown outcome, is a refusal."""
+    path = Path(path)
+    try:
+        record = json.loads(path.read_text())
+    except (OSError, ValueError) as error:
+        raise Failure(f"{path}: not a readable acceptance record ({error})")
+    if not isinstance(record, dict) or record.get("schema") != "helix-acceptance-1":
+        raise Failure(f"{path}: schema is not helix-acceptance-1")
+    for key, want in (("artifact", source.name), ("sha256", digest), ("target", target), ("outcome", "pass")):
+        if record.get(key) != want:
+            raise Failure(f"{path}: {key} is {record.get(key)!r}, expected {want!r}")
+    scenarios = record.get("scenarios")
+    if not isinstance(scenarios, dict):
+        raise Failure(f"{path}: no scenarios")
+    missing = [s for s in ACCEPTANCE_SCENARIOS if s not in scenarios]
+    if missing:
+        raise Failure(f"{path}: scenarios missing: {', '.join(missing)}")
+    for name in ACCEPTANCE_SCENARIOS:
+        entry = scenarios[name]
+        if not isinstance(entry, dict) or entry.get("outcome") != "pass":
+            raise Failure(f"{path}: scenario {name} did not pass")
+        report_path = path.parent / str(entry.get("report", ""))
+        try:
+            report = json.loads(report_path.read_text())
+        except (OSError, ValueError) as error:
+            raise Failure(f"{path}: scenario {name}: run report {report_path} unreadable ({error})")
+        if report.get("test_outcome") != "pass":
+            raise Failure(f"{report_path}: test_outcome is {report.get('test_outcome')!r}")
+        if report.get("abi") != ACCEPTANCE_ABI[target]:
+            raise Failure(f"{report_path}: ran on ABI {report.get('abi')!r}, not {ACCEPTANCE_ABI[target]}")
+        if digest not in (report.get("input_files") or {}).values():
+            raise Failure(f"{report_path}: {source.name} ({digest}) is not among the run's inputs")
+
+
 def cmd_promote(args):
     """Copies an accepted candidate unchanged to dist/Helix-<version>-<target>.zip and
-    adds it to dist/SHA256SUMS. --accepted names the native acceptance record; it must
-    state the archive's SHA-256. The archive's files are checked against its contents list."""
+    adds it to dist/SHA256SUMS. --accepted names the acceptance record (see
+    check_acceptance). The archive's files are checked against its contents list.
+    An interrupted promotion leaves a journal (dist/.<name>.promoting) and is finished
+    by running the same command again; without a journal nothing is replaced."""
     unreleased = REPO / "dist" / "unreleased"
     source = unreleased / f"Helix-{PACKAGE_VERSION}-candidate{args.candidate}-{args.target}.zip"
     listing = source.with_name(source.name[:-4] + ".contents.sha256")
@@ -716,34 +776,55 @@ def cmd_promote(args):
     digest = sha256_file(source)
     if f"{digest}  {source.name}" not in listed:
         raise Failure(f"{source.name} does not match its line in SHA256SUMS-{PACKAGE_VERSION}")
-    if digest not in Path(args.accepted).read_text():
-        raise Failure(f"{args.accepted} does not name {source.name}'s SHA-256 {digest}")
+    check_acceptance(args.accepted, source, digest, args.target)
     with tempfile.TemporaryDirectory(prefix="hx-promote-") as tmp:
         run(["unzip", "-q", source, "-d", tmp])
         found = sorted(p for p in Path(tmp).rglob("*") if p.is_file())
         actual = "".join(f"{sha256_file(p)}  {p.relative_to(tmp).as_posix()}\n" for p in found)
         if actual != listing.read_text():
             raise Failure(f"{source.name}'s files do not match {listing.name}")
+    dist = REPO / "dist"
     name = f"Helix-{PACKAGE_VERSION}-{args.target}"
-    archive, contents = REPO / "dist" / f"{name}.zip", REPO / "dist" / f"{name}.contents.sha256"
-    if archive.exists() or contents.exists():
+    archive, contents = dist / f"{name}.zip", dist / f"{name}.contents.sha256"
+    sums = dist / "SHA256SUMS"
+    journal = dist / f".{name}.promoting"
+    intent = {"source": source.name, "sha256": digest, "contents_sha256": sha256_file(listing)}
+    sums_lines = sums.read_text().split("\n") if sums.exists() else []
+    line = f"{digest}  {archive.name}"
+    if journal.exists():
+        # Resume only the promotion the journal names; anything else is someone else's.
+        if json.loads(journal.read_text()) != intent:
+            raise Failure(f"{journal} names another promotion; resolve it by hand")
+    elif archive.exists() or contents.exists() or any(l.endswith(f"  {archive.name}") for l in sums_lines):
         raise Failure(f"{archive} exists; delivered archives are never replaced")
-    # Staged: both files are written under temporary names first, so a failed copy
-    # leaves nothing that blocks a retry; SHA256SUMS is written last.
-    staged = [(source, archive.with_name("." + archive.name + ".part")),
-              (listing, contents.with_name("." + contents.name + ".part"))]
-    try:
-        for src, part in staged:
+    else:
+        part = journal.with_name(journal.name + ".part")
+        part.write_text(json.dumps(intent))
+        os.replace(part, journal)
+    if any(l.endswith(f"  {archive.name}") and l != line for l in sums_lines):
+        raise Failure(f"dist/SHA256SUMS has another digest for {archive.name}")
+    # Each step checks what is already there, so a retry after any failure continues.
+    for src, final, want in ((source, archive, digest), (listing, contents, intent["contents_sha256"])):
+        if final.exists():
+            if sha256_file(final) != want:
+                raise Failure(f"{final} differs from {src.name}; resolve it by hand")
+            continue
+        part = final.with_name("." + final.name + ".part")
+        try:
             shutil.copyfile(src, part)
-        if sha256_file(staged[0][1]) != digest:
-            raise Failure(f"the copy of {source.name} differs from the candidate")
-        for (_, part), final in zip(staged, (archive, contents)):
+            if sha256_file(part) != want:
+                raise Failure(f"the copy of {src.name} differs from the candidate")
             os.replace(part, final)
-    finally:
-        for _, part in staged:
+        finally:
             part.unlink(missing_ok=True)
-    with open(REPO / "dist" / "SHA256SUMS", "a") as sums:
-        sums.write(f"{digest}  {archive.name}\n")
+    if line not in sums_lines:
+        with open(sums, "a") as out:
+            out.write(line + "\n")
+            out.flush()
+            os.fsync(out.fileno())
+    if line not in sums.read_text().split("\n"):
+        raise Failure(f"{sums} lacks the line for {archive.name}")
+    journal.unlink()
     print(archive)
 
 
@@ -771,7 +852,7 @@ def main():
                             help="pack the linked binary unstripped (diagnostic variant)")
         if name == "promote":
             sp.add_argument("--accepted", required=True,
-                            help="acceptance record that states the archive's SHA-256")
+                            help="acceptance record (JSON, schema helix-acceptance-1; see check_acceptance)")
         if name == "build":
             # Unwind (the default): a panic on the editor thread can then end the
             # program from the main task; AROS cannot abort() from a thread cleanly.

@@ -46,7 +46,7 @@ paths. Every key can also be given as an environment variable; run
     python3 scripts/hx.py materialize   # work/helix and work/crates from the series
     python3 scripts/hx.py build         # build/aros-x86_64-abiv11-pc/target/x86_64-aros/release/hx
     python3 scripts/hx.py package --candidate 1   # dist/unreleased/Helix-<version>-candidate1-<target>.zip
-    python3 scripts/hx.py promote --candidate 1 --accepted REPORT.md   # after acceptance: dist/Helix-<version>-<target>.zip
+    python3 scripts/hx.py promote --candidate 1 --accepted ACCEPTANCE.json   # after acceptance: dist/Helix-<version>-<target>.zip
     python3 scripts/hx.py verify        # every series rebuilds its work copy
 
 For mainline add `--target aros-x86_64-abiv1-pc` to `config`, `build`,
@@ -60,11 +60,17 @@ or later) and links the SDK's own libpthread.
 without stripping it, as `...-candidate<N>-unstripped-<target>.zip`, for
 diagnosis; it is never promoted. `promote` copies the tested candidate byte for
 byte to `dist/` and adds it to `dist/SHA256SUMS`; neither replaces an existing
-file. `promote` needs `--accepted`, the native acceptance record, and refuses
-when that file does not state the archive's SHA-256 or when the unpacked files
-differ from the candidate's contents list. It copies under temporary names
-first, so a failed copy leaves nothing that blocks a retry. Whether the record
-shows a passed acceptance is still the operator's judgement.
+file. `promote` needs `--accepted`, the acceptance record: JSON with schema
+`helix-acceptance-1`, the candidate's file name, SHA-256 and target, outcome
+`pass`, and every scenario of `ACCEPTANCE_SCENARIOS` marked `pass` with the
+aros-vm-runs `REPORT.json` of its run. Each named run must have passed on the
+target's ABI with this archive among its inputs. A record that is not a pass
+for this archive and target is refused, as is an archive whose unpacked files
+differ from its contents list. Copies go to temporary names first; a journal
+(`dist/.<name>.promoting`) marks a promotion in progress, so running the same
+command again after a failure at any step finishes it, while an existing
+archive without a journal is never replaced. `python3 scripts/test_promote.py`
+checks the refusals and the resumption on the host.
 
 Before compiling, `build` checks libc-aros against the SDK (the ABI layout
 gate): the SDK's compiler measures `sizeof`, `_Alignof` and `offsetof` of the
