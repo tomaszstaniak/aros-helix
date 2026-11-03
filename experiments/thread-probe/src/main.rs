@@ -11,12 +11,14 @@
 //!                          12 s idle so the blocking-pool thread ends on its own
 //!   thread-probe fsm DIR N  N rounds of four threads at a time, thread i reading its
 //!                          own DIR/i.txt (i = 0..3, different contents); each read must
-//!                          return the bytes that file had when read serially
+//!                          return the bytes that file had when read serially; the
+//!                          four reads start together, and the end line counts the
+//!                          rounds in which all four were in progress at once
 //!
 //! Each step prints a line before and after, so the last line shows where it
 //! stopped, and every round prints its result (fsm: failed rounds and every 25th). Any failed step (spawn, join,
 //! read, a nested task, a panic that was not caught) makes the exit status 10;
-//! an unknown mode or bad arguments give 20. The last line before "main end"
+//! an unknown mode or bad arguments (also a round count of 0) give 20. The last line before "main end"
 //! is "result: ok" or "result: N failed".
 use std::io::Write;
 
@@ -40,6 +42,9 @@ fn file_and_rounds(default: u64) -> Result<(String, u64), String> {
         None => default,
         Some(n) => n.parse().map_err(|_| format!("bad round count {n:?}"))?,
     };
+    if rounds == 0 {
+        return Err("the round count must be at least 1".into());
+    }
     Ok((file, rounds))
 }
 
@@ -169,33 +174,75 @@ fn main() {
                 }
             }
             let expected = std::sync::Arc::new(expected);
+            let mut overlapped = 0u64;
             for round in 0..rounds {
+                // A start gate: the round's reads begin together once every thread that
+                // was created is waiting, so they overlap; a failed spawn only lowers
+                // the count main waits for, and nobody is left waiting.
+                let gate = std::sync::Arc::new((std::sync::Mutex::new((0usize, false)), std::sync::Condvar::new()));
                 let handles: Vec<_> = (0..4)
                     .map(|i| {
-                        let (path, expected) = (paths[i].clone(), expected.clone());
-                        std::thread::Builder::new().spawn(move || match std::fs::read(&path) {
-                            Err(e) => Err(format!("{i}: read: {e}")),
-                            Ok(d) if d != expected[i] => {
-                                let other = expected.iter().position(|x| *x == d);
-                                Err(format!("{i}: wrong bytes ({} bytes, same as file {other:?})", d.len()))
+                        let (path, expected, gate) = (paths[i].clone(), expected.clone(), gate.clone());
+                        std::thread::Builder::new().spawn(move || {
+                            let (lock, cv) = &*gate;
+                            let mut st = lock.lock().unwrap();
+                            st.0 += 1;
+                            cv.notify_all();
+                            while !st.1 {
+                                st = cv.wait(st).unwrap();
                             }
-                            Ok(d) => Ok(d.len()),
+                            drop(st);
+                            let start = std::time::Instant::now();
+                            let r = std::fs::read(&path);
+                            let span = (start, std::time::Instant::now());
+                            let r = match r {
+                                Err(e) => Err(format!("{i}: read: {e}")),
+                                Ok(d) if d != expected[i] => {
+                                    let other = expected.iter().position(|x| *x == d);
+                                    Err(format!("{i}: wrong bytes ({} bytes, same as file {other:?})", d.len()))
+                                }
+                                Ok(d) => Ok(d.len()),
+                            };
+                            (r, span)
                         })
                     })
                     .collect();
+                let created = handles.iter().filter(|h| h.is_ok()).count();
+                {
+                    let (lock, cv) = &*gate;
+                    let mut st = lock.lock().unwrap();
+                    while st.0 < created {
+                        st = cv.wait(st).unwrap();
+                    }
+                    st.1 = true;
+                    cv.notify_all();
+                }
                 let mut results = Vec::new();
+                let mut spans = Vec::new();
                 for h in handles {
                     results.push(match h {
                         Err(e) => Err(format!("spawn: {e}")),
-                        Ok(h) => h.join().unwrap_or_else(|_| Err("join: thread panicked".into())),
+                        Ok(h) => match h.join() {
+                            Err(_) => Err("join: thread panicked".into()),
+                            Ok((r, span)) => {
+                                spans.push(span);
+                                r
+                            }
+                        },
                     });
                 }
+                // All four reads were in progress at one moment: the latest start
+                // came before the earliest end.
+                let all = spans.len() == 4
+                    && spans.iter().map(|s| s.0).max() < spans.iter().map(|s| s.1).min();
+                overlapped += u64::from(all);
                 let ok = results.iter().all(|r| r.is_ok());
                 if !ok || round % 25 == 24 {
                     say(&format!("{} round {round}: {results:?}", if ok { "ok" } else { "FAIL" }));
                 }
                 failed += results.iter().filter(|r| r.is_err()).count() as u64;
             }
+            say(&format!("rounds with all four reads overlapping: {overlapped} of {rounds}"));
             say(&format!("rounds done: {rounds}"));
         }
         _ => usage(&format!("unknown mode {mode:?}")),

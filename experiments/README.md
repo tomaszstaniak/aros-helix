@@ -82,4 +82,8 @@ a thread is not caught on v1 (`tcatch` aborts).
 That version printed some failures (a failed read, join or nested task) and
 still ended with status 0, so those runs do not exclude failed rounds. Since
 2026-11-03 every round prints `ok` or `FAIL`, any failure gives status 10 and
-an unknown mode or bad arguments 20; keep the whole output with the status.
+an unknown mode or bad arguments 20 (also a round count of 0); keep the whole
+output with the status. `fsm DIR N` starts each round's four reads together
+(after every created thread waits at a gate) and ends with the number of rounds
+in which all four reads were in progress at once; a result without overlap
+says nothing about a race.
