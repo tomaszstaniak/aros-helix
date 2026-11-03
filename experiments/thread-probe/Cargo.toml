@@ -1,0 +1,15 @@
+[package]
+name = "thread-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "thread-probe"
+path = "src/main.rs"
+
+[dependencies]
+# Same version and runtime features as Helix 25.07.1.
+tokio = { version = "=1.46.1", features = ["rt", "rt-multi-thread", "fs", "time", "macros"] }
+
+[workspace]

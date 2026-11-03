@@ -66,3 +66,16 @@ highlighting). Details in Limpet's `docs/evidence/2026-10-19-down-key/`.
 Tried and rejected: `parse-budget/0001-*.patch` gives the first parse 3 s on
 AROS. The 230 KB file then opened highlighted, but each keystroke re-parsed
 for 0.3-1 s and keys queued up. Kept for reference; not in the series.
+
+## thread-probe
+
+Question: why did hx fail at its first thread on mainline (ABIv1) nightly
+20261031, and do threads that read files and end, or Tokio's runtime as
+Helix uses it, fail there on their own?
+Run: `python3 scripts/hx.py build --target aros-x86_64-abiv1-pc --probe
+thread-probe`, then `thread-probe spawn|catch|tcatch|fs FILE N|fsc FILE N|tokio FILE N`.
+Found (2026-11-03, v1 nightly 20261031): with rust-aros libc-aros 79324c2
+`spawn` ended the creating task at PC 0, because mainline's `pthread_attr_t`
+grew to 168 bytes (rust-aros 43b3798 fixes it). With the fix, spawn, `fs`,
+`fsc` and `tokio` pass 50, 50 and 4 rounds; a panic in a thread is not
+caught on v1 (`tcatch` aborts).
