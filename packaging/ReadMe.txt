@@ -1,17 +1,17 @@
-Helix 25.07.1 for AROS x86_64 (ABIv11), preview 2 test 1
-==========================================================
+Helix 25.07.1 for AROS, preview 2
+=================================
 
 Helix is a modal text editor (https://helix-editor.com). This is a preview
-of a native AROS build of the Helix 25.07.1 release, for AROS One and other
-ABIv11 systems on x86_64. It is an early version: try it on files you have
-copies of.
+of a native AROS build of the Helix 25.07.1 release, for
+@SYSTEM@.
+It is an early version: try it on files you have copies of.
 
 Requirements
 ------------
-- Limpet 0.6.1 or later. Start Helix in a Limpet window: the AROS console
-  (CON:) does not understand the terminal sequences Helix uses. With
-  Limpet 0.6.2-test1 or later, scrolling no longer shows lines of two
-  screens at once.
+- Limpet 0.9.0 (@LIMPET@ from
+  https://github.com/tomaszstaniak/limpet/releases). Start Helix in a
+  Limpet window: the AROS console (CON:) does not understand the terminal
+  sequences Helix uses.
 - About 45 MB of disk space.
 
 Installing
@@ -28,8 +28,9 @@ Using
     hx --tutor            the tutorial
     hx --health           what this build finds and supports
 
-Quit with :q, or :wq to save first. Closing the Limpet window also ends
-Helix, without saving.
+Quit with :q, or :wq to save first. With unsaved changes :q refuses and
+names the files; :q! quits without saving. Closing the Limpet window also
+ends Helix, without saving.
 
 Settings (config.toml, languages.toml, your own themes) go to ENVARC:helix,
 the log to T:helix/helix.log. Files are read and written as UTF-8. Letters
@@ -43,8 +44,10 @@ back. A file without write permission is not overwritten.
 
 Not available yet
 -----------------
-- Language servers, debug adapters, formatters, :sh and :pipe. Helix cannot
-  start other programs on AROS yet and says so.
+- Language servers, debug adapters, formatters, :sh, :pipe and the other
+  commands that run a program. Helix does not start other programs on AROS
+  in this version; such a command reports "starting programs from Helix is
+  not supported on AROS yet" and nothing is started.
 - Git status in the gutter.
 - The system clipboard. Yank and paste work inside Helix (y, p).
 - Syntax highlighting for languages other than Rust. Large Rust files (a few
