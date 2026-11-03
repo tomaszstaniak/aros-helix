@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 09:53:29 +0100
+Subject: [PATCH 8/8] AROS: say that a configured formatter was not run
+
+Helix cannot start programs on AROS: helix_stdx::process refuses each
+one before anything is started. A formatter set in languages.toml then
+failed with "Failed to spawn formatter <path>: Unsupported", which does
+not tell the user why. On AROS, :format now says that the formatter was
+not run because starting programs is not supported yet. Other errors and
+other platforms are unchanged.
+
+Saving with auto-format still writes the file unformatted and logs the
+reason, as Helix does when a formatter fails.
+---
+ helix-view/src/document.rs | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/helix-view/src/document.rs b/helix-view/src/document.rs
+index 2b44c96eb28a2c935f16ed250aa1aa96cae3e8dc..8fdc5253420701f3902a1e76bb315d0c9a42fc0e 100644
+--- a/helix-view/src/document.rs
++++ b/helix-view/src/document.rs
+@@ -2306,6 +2306,15 @@ impl std::error::Error for FormatterError {}
+ impl Display for FormatterError {
+     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+         match self {
++            // AROS: helix_stdx::process refuses every program before starting it.
++            #[cfg(target_os = "aros")]
++            Self::SpawningFailed { command, error } if *error == std::io::ErrorKind::Unsupported => {
++                write!(
++                    f,
++                    "Formatter {} was not run: starting programs from Helix is not supported on AROS yet",
++                    command
++                )
++            }
+             Self::SpawningFailed { command, error } => {
+                 write!(f, "Failed to spawn formatter {}: {:?}", command, error)
+             }

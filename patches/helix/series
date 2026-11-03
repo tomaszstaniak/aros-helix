@@ -5,3 +5,4 @@
 0005-AROS-tree-sitter-grammars-linked-into-the-program.patch
 0006-End-when-the-terminal-s-input-fails-or-closes-instea.patch
 0007-Mark-each-frame-with-synchronized-output-DEC-2026.patch
+0008-AROS-say-that-a-configured-formatter-was-not-run.patch
