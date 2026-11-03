@@ -546,7 +546,13 @@ def cmd_build(args):
     # getrandom 0.3 has no AROS backend: helix-stdx supplies the custom one.
     flags = ["-Cpanic=" + panic, "--cfg", 'getrandom_backend="custom"', "--cfg", "tokio_unstable",
              f"--remap-path-prefix={src}=/helix", f"--remap-path-prefix={cfg['cargo_home']}=/cargo",
-             f"--remap-path-prefix={libc}=/libc-aros", f"--remap-path-prefix={sysroot}=/rust"]
+             f"--remap-path-prefix={libc}=/libc-aros", f"--remap-path-prefix={sysroot}=/rust",
+             # One section per function gives hx about 12 000 loadable sections, and
+             # AROS keeps them as that many segments. ABIv11 debug.library lists a
+             # loaded module before building its segment array; a task that ends
+             # meanwhile (UnLoadSeg -> UnregisterModule) reads the missing array and
+             # fails. Fewer sections make that window and every module walk shorter.
+             "-Zfunction-sections=no"]
     # The AROS GCC driver searches the SDK's lib/ before any -L, so a patched
     # libpthread.a cannot win the -lpthread lookup. The two patched objects go first
     # on the link line instead: they define every symbol of the SDK's pthread.o and
@@ -618,7 +624,7 @@ def cmd_build(args):
     sdk = Path(cfg["aros_sdk"])
     record = {"target": args.target, "helix_work_head": head, "rust_aros_commit": rcommit,
               "toolchain": cfg["toolchain"], "rustc": rustc, "rust_src": tree_hash(Path(sysroot) / "lib/rustlib/src/rust/library"),
-              "panic": panic, "gcc": run([cfg["aros_gcc"], "--version"]).stdout.decode().splitlines()[0],
+              "panic": panic, "function_sections": "no", "gcc": run([cfg["aros_gcc"], "--version"]).stdout.decode().splitlines()[0],
               "sdk_libraries": {n: sha256_file(sdk / "lib" / n) for n in ("libpthread.a", "libposixc.a", "libstdc.a")
                                 if (sdk / "lib" / n).exists()},
               "crates": {n: tree_hash(p) for n, p in crates.items()}, "libc": tree_hash(libc),

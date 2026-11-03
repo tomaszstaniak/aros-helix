@@ -87,3 +87,22 @@ output with the status. `fsm DIR N` starts each round's four reads together
 (after every created thread waits at a gate) and ends with the number of rounds
 in which all four reads were in progress at once; a result without overlap
 says nothing about a race.
+
+## modrace
+
+Question: does a loaded program's debug information become visible before it
+is complete, so that a task ending at that moment fails in
+`Debug_UnregisterModule`?
+Run: `x86_64-aros-gcc --sysroot=SDK -O2 -o modrace modrace/modrace.c`, then
+`modrace CRASH FILE SECONDS` (public calls only: two processes load and unload
+FILE while short `NP_Entry` processes end) or `modrace DETECT FILE SECONDS`
+(walks debug.library's private module list; read-only).
+Found (2026-11-03): on AROS One 1.3 (debug.library 2.1, 01/30/26) `CRASH`
+with hx candidate 2 (12 371 loadable sections) as FILE ended in a Software
+Failure in `Debug_6_UnregisterModule` with RAX=0 and RSI=0x3052: a module with
+12 371 segments listed before its segment array existed. The acceptance crash
+was in the same loop (+0x16C against +0x169). Mainline nightly 20261031
+(debug.library 2.3) ran the same 200 s without failure; mainline 1c25bf6c16
+builds the array before listing the module. `DETECT` saw nothing in 54 loads,
+so it cannot show the absence of the window. Builds since then use
+`-Zfunction-sections=no` (7 loadable sections).
