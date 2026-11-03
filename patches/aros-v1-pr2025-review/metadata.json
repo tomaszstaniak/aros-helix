@@ -8,7 +8,7 @@
   "checked_date": "2026-11-03",
   "validation": "GCC10.5 actual affected target builds/links: 7 successful combinations. Targets: close_pipe_progress, vfork_context, vfork_fd, vfork_fd_thread. Pre-existing v11 private-header exclusions: vfork_context (libraries/posixc.h absent; original source fails identically). Original custom target fails on missing test.h; restored USER_INCLUDES makes it build. Actual-helper host test and Ruff D205/D213 pass. No guest runtime repeated. Single-line docstrings satisfy both D212 and D213 (checked separately with D205); the host regression passes again.",
   "related_submission": "https://github.com/aros-development-team/AROS/pull/2025",
-  "next_action": "Publish saved single-line docstring correction; retain existing scoped build/runtime limits.",
+  "next_action": "Follow remaining generic Codacy findings and maintainer review; retain recorded build/runtime qualification limits.",
   "review_source_sha256": {
     "developer/debug/test/crt/posixc/mmakefile.src": "69b784021dae2ac9dcaa452478ca3a872736fcbf9507ed383972f68e62f5b4df",
     "developer/debug/test/crt/posixc/test_atomic_dup.py": "b586cf3ba4934d0b470bad2a00143b55cffaef3d894f4a4cff0b560ab7d58c5b",
@@ -16,5 +16,8 @@
     "developer/debug/test/crt/posixc/vfork_fd.c": "68c990cd4e2d532e6125ceafdb50d089137618e46eb30f93b034aa145a839593"
   },
   "submission_url": "https://github.com/aros-development-team/AROS/pull/2025",
-  "submission_revision": "744b3c1585e871ae3cbc78660e791006fea8d732"
+  "submission_revision": "5a7da7ea8f1b39e37f468420776d8bdf68e21d7f",
+  "prior_review_followups": [
+    "744b3c1585e871ae3cbc78660e791006fea8d732"
+  ]
 }

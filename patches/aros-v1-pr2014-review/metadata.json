@@ -2,16 +2,18 @@
   "id": "aros-pr2014-codacy-review",
   "upstream": "https://github.com/aros-development-team/AROS",
   "base": "72d6c581909ac34802adf3bae4904696607d7972",
-  "status": "candidate",
+  "status": "upstream",
   "v1_applicability": "Review follow-up for existing mainline PR; preserves production behavior and fixes test integration/readability where applicable.",
   "checked_upstream": "72d6c581909ac34802adf3bae4904696607d7972",
   "checked_date": "2026-11-03",
   "validation": "GCC10.5 actual affected target builds/links: 7 successful combinations. Targets: close_pipe_progress, vfork_context, vfork_fd, vfork_fd_thread. Pre-existing v11 private-header exclusions: vfork_context (libraries/posixc.h absent; original source fails identically). Original custom target fails on missing test.h; restored USER_INCLUDES makes it build. No guest runtime repeated.",
   "related_submission": "https://github.com/aros-development-team/AROS/pull/2014",
-  "next_action": "Publish saved follow-up on existing PR2014; keep current readiness and qualification limits.",
+  "next_action": "Follow remaining generic Codacy findings and maintainer review; retain recorded build/runtime qualification limits.",
   "review_source_sha256": {
     "developer/debug/test/crt/posixc/mmakefile.src": "2708dd44cf7ba9cf0ede195dc38e1ee7646963649b64a89ff302e2a4abd1d4ca",
     "developer/debug/test/crt/posixc/vfork_context.c": "38707b449023177267140e357dcafde08de6ade61f04b71bb41c6a5b5783e6d7",
     "developer/debug/test/crt/posixc/vfork_fd.c": "68c990cd4e2d532e6125ceafdb50d089137618e46eb30f93b034aa145a839593"
-  }
+  },
+  "submission_url": "https://github.com/aros-development-team/AROS/pull/2014",
+  "submission_revision": "635fce48346918957bb5cd060d5603f8a01ebfef"
 }
