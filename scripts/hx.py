@@ -7,6 +7,8 @@ Commands (run `hx.py COMMAND --help`):
   export       write the work copies' commits to patches/ (helix and crates)
   verify       rebuild every series in a temporary directory and compare trees
   build        build hx from the work copy into the build root
+  package      pack the last build as a candidate in dist/unreleased
+  promote      copy an accepted candidate unchanged into dist/
 
 Nothing here edits upstream/helix, a shared toolchain, the SDK or the Cargo
 registry. Existing work copies are never reset or recreated.
@@ -387,6 +389,104 @@ def target_spec(cfg, rtree):
     return json.dumps(spec, indent=2, sort_keys=True) + "\n"
 
 
+# Layouts libc-aros declares that must match the SDK's C headers. Rust name ->
+# C type, for size and alignment; then (Rust type, Rust field, C type, C member)
+# for offsets std and Helix's crates read. pollfd, ip_mreq and ipv6_mreq are left
+# out: the ABIv11 SDK headers do not declare them.
+ABI_TYPES = {
+    "pthread_attr_t": "pthread_attr_t", "pthread_mutexattr_t": "pthread_mutexattr_t",
+    "pthread_mutex_t": "pthread_mutex_t", "pthread_condattr_t": "pthread_condattr_t",
+    "pthread_cond_t": "pthread_cond_t", "pthread_rwlock_t": "pthread_rwlock_t",
+    "pthread_t": "pthread_t", "pthread_key_t": "pthread_key_t",
+    "stat": "struct stat", "dirent": "struct dirent", "timespec": "struct timespec",
+    "timeval": "struct timeval", "tm": "struct tm", "termios": "struct termios",
+    "winsize": "struct winsize", "sigset_t": "sigset_t", "sigaction": "struct sigaction",
+    "passwd": "struct passwd", "addrinfo": "struct addrinfo", "linger": "struct linger",
+    "sockaddr": "struct sockaddr", "sockaddr_in": "struct sockaddr_in", "sockaddr_in6": "struct sockaddr_in6",
+    "sockaddr_un": "struct sockaddr_un", "sockaddr_storage": "struct sockaddr_storage",
+    "in_addr": "struct in_addr", "in6_addr": "struct in6_addr", "iovec": "struct iovec",
+    "off_t": "off_t", "time_t": "time_t", "ino_t": "ino_t", "mode_t": "mode_t", "nlink_t": "nlink_t",
+    "pid_t": "pid_t", "dev_t": "dev_t", "uid_t": "uid_t", "gid_t": "gid_t", "blksize_t": "blksize_t",
+    "blkcnt_t": "blkcnt_t", "clockid_t": "clockid_t", "suseconds_t": "suseconds_t",
+    "socklen_t": "socklen_t", "sa_family_t": "sa_family_t", "cc_t": "cc_t", "tcflag_t": "tcflag_t",
+    "speed_t": "speed_t",
+}
+ABI_FIELDS = [
+    ("stat", "st_ino", "struct stat", "st_ino"), ("stat", "st_mode", "struct stat", "st_mode"),
+    ("stat", "st_nlink", "struct stat", "st_nlink"), ("stat", "st_uid", "struct stat", "st_uid"),
+    ("stat", "st_gid", "struct stat", "st_gid"), ("stat", "st_rdev", "struct stat", "st_rdev"),
+    ("stat", "st_size", "struct stat", "st_size"), ("stat", "st_atime", "struct stat", "st_atim.tv_sec"),
+    ("stat", "st_atime_nsec", "struct stat", "st_atim.tv_nsec"), ("stat", "st_mtime", "struct stat", "st_mtim.tv_sec"),
+    ("stat", "st_mtime_nsec", "struct stat", "st_mtim.tv_nsec"), ("stat", "st_ctime", "struct stat", "st_ctim.tv_sec"),
+    ("stat", "st_ctime_nsec", "struct stat", "st_ctim.tv_nsec"), ("stat", "st_blksize", "struct stat", "st_blksize"),
+    ("stat", "st_blocks", "struct stat", "st_blocks"),
+    ("dirent", "d_off", "struct dirent", "d_off"), ("dirent", "d_reclen", "struct dirent", "d_reclen"),
+    ("dirent", "d_type", "struct dirent", "d_type"), ("dirent", "d_name", "struct dirent", "d_name"),
+    ("timespec", "tv_nsec", "struct timespec", "tv_nsec"), ("timeval", "tv_usec", "struct timeval", "tv_usec"),
+    ("tm", "tm_gmtoff", "struct tm", "tm_gmtoff"), ("tm", "tm_zone", "struct tm", "tm_zone"),
+    ("termios", "c_cc", "struct termios", "c_cc"), ("winsize", "ws_col", "struct winsize", "ws_col"),
+    ("sigaction", "sa_mask", "struct sigaction", "sa_mask"), ("sigaction", "sa_flags", "struct sigaction", "sa_flags"),
+    ("passwd", "pw_uid", "struct passwd", "pw_uid"), ("passwd", "pw_dir", "struct passwd", "pw_dir"),
+    ("passwd", "pw_passwd", "struct passwd", "pw_passwd"),
+    ("addrinfo", "ai_addrlen", "struct addrinfo", "ai_addrlen"), ("addrinfo", "ai_canonname", "struct addrinfo", "ai_canonname"),
+    ("addrinfo", "ai_addr", "struct addrinfo", "ai_addr"), ("addrinfo", "ai_next", "struct addrinfo", "ai_next"),
+    ("linger", "l_linger", "struct linger", "l_linger"),
+    ("sockaddr_in", "sin_addr", "struct sockaddr_in", "sin_addr"),
+    ("sockaddr_in6", "sin6_addr", "struct sockaddr_in6", "sin6_addr"),
+    ("sockaddr_in6", "sin6_scope_id", "struct sockaddr_in6", "sin6_scope_id"),
+]
+ABI_HEADERS = ("sys/types.h", "sys/stat.h", "sys/time.h", "sys/socket.h", "sys/uio.h", "sys/un.h", "sys/ioctl.h",
+               "netinet/in.h", "netdb.h", "dirent.h", "pwd.h", "termios.h", "signal.h", "pthread.h", "time.h")
+
+
+def abi_gate(cfg, root, libc, target_json):
+    """Fails the build when libc-aros disagrees with the SDK about a layout in ABI_TYPES
+    or ABI_FIELDS. The SDK side comes from its own compiler (array sizes in an object
+    file, read with nm); the Rust side from const assertions in a `cargo check`.
+    Nothing runs on AROS."""
+    out = root / "abi-gate"
+    if out.exists():
+        shutil.rmtree(out)
+    out.mkdir(parents=True)
+    probes = [(f"s{i}", f"sizeof({c})", None) for i, c in enumerate(ABI_TYPES.values())]
+    probes += [(f"a{i}", f"_Alignof({c})", None) for i, c in enumerate(ABI_TYPES.values())]
+    # A zero-length array is not allowed: offsets are stored plus one.
+    probes += [(f"o{i}", f"offsetof({ct}, {cm}) + 1", 1) for i, (_, _, ct, cm) in enumerate(ABI_FIELDS)]
+    source = "".join(f"#include <{h}>\n" for h in ("stddef.h",) + ABI_HEADERS)
+    source += "".join(f"unsigned char abi_{n}[{e}] = {{1}};\n" for n, e, _ in probes)
+    (out / "layout.c").write_text(source)
+    run([cfg["aros_gcc"], f"--sysroot={cfg['aros_sdk']}", "-c", out / "layout.c", "-o", out / "layout.o"])
+    sizes = {}
+    for line in run([cfg["aros_gcc"].replace("-gcc", "-nm"), "-S", "--defined-only", out / "layout.o"]).stdout.decode().splitlines():
+        parts = line.split()
+        if len(parts) == 4 and parts[3].startswith("abi_"):
+            sizes[parts[3][4:]] = int(parts[1], 16)
+    measured = {n: sizes[n] - (bias or 0) for n, _, bias in probes}
+    checks = []
+    for i, rust in enumerate(ABI_TYPES):
+        checks.append((f"size_of::<libc::{rust}>()", measured[f"s{i}"], f"size of {rust}"))
+        checks.append((f"align_of::<libc::{rust}>()", measured[f"a{i}"], f"alignment of {rust}"))
+    for i, (rt, rf, _, cm) in enumerate(ABI_FIELDS):
+        checks.append((f"offset_of!(libc::{rt}, {rf})", measured[f"o{i}"], f"offset of {rt}.{rf} (C {cm})"))
+    lib = ["#![no_std]", "use core::mem::{align_of, offset_of, size_of};"]
+    lib += [f'const _: () = assert!({expr} == {value}, "{what}: the SDK has {value}");' for expr, value, what in checks]
+    (out / "lib.rs").write_text("\n".join(lib) + "\n")
+    (out / "Cargo.toml").write_text(
+        '[package]\nname = "abi-gate"\nversion = "0.0.0"\nedition = "2021"\npublish = false\n\n'
+        '[lib]\npath = "lib.rs"\n\n[dependencies]\nlibc = { path = ' + json.dumps(str(libc)) + ' }\n\n[workspace]\n')
+    (out / "sdk-layout.json").write_text(json.dumps({what: value for _, value, what in checks}, indent=1) + "\n")
+    env = dict(os.environ, CARGO_HOME=cfg["cargo_home"], CARGO_TARGET_DIR=str(root / "abi-gate-target"),
+               AROS_GCC=cfg["aros_gcc"], AROS_SDK=cfg["aros_sdk"], AROS_AR=cfg["aros_ar"])
+    result = run(["cargo", "+" + cfg["toolchain"], "check", "--offline", "--target", target_json,
+                  "-Zbuild-std=core", "-Zjson-target-spec"], cwd=out, env=env, check=False)
+    if result.returncode:
+        log = result.stderr.decode()
+        wrong = sorted(set(re.findall(r'"([^"]+: the SDK has \d+)"', log)))
+        raise Failure("libc-aros does not match the SDK's C layouts:\n  " + "\n  ".join(wrong or [log[-3000:]]))
+    print(f"abi gate: {len(checks)} layouts of libc-aros match {cfg['aros_sdk']}")
+    return sha256_file(out / "sdk-layout.json")
+
+
 def cmd_build(args):
     info = TARGETS.get(args.target)
     needs = ["aros_gcc", "aros_ar", "aros_sdk", "rust_aros", "rust_aros_commit", "toolchain"]
@@ -429,6 +529,9 @@ def cmd_build(args):
     text = target_spec(cfg, rtree)
     if not target_json.exists() or target_json.read_text() != text:
         target_json.write_text(text)
+    # --no-abi-gate only for diagnostic rebuilds of an earlier input set; package
+    # refuses such a build.
+    sdk_layout = "skipped" if args.no_abi_gate else abi_gate(cfg, root, libc, target_json)
 
     crates = {}
     for spec in crate_specs():
@@ -520,7 +623,7 @@ def cmd_build(args):
                                 if (sdk / "lib" / n).exists()},
               "crates": {n: tree_hash(p) for n, p in crates.items()}, "libc": tree_hash(libc),
               "pthread": pthread.name if pthread else "SDK libpthread.a", "grammars": sha256_file(grammars),
-              "target_json": sha256_file(target_json),
+              "target_json": sha256_file(target_json), "sdk_layout": sdk_layout,
               "binary": str(binary), "sha256": sha256_file(binary), "size": binary.stat().st_size}
     (root / "build.json").write_text(json.dumps(record, indent=2) + "\n")
     print(json.dumps(record, indent=2))
@@ -538,7 +641,8 @@ README_FIELDS = {
 
 
 def cmd_package(args):
-    """Packs the last build into dist/Helix-<version>-<target>.zip (never replaced)."""
+    """Packs the last build as candidate N: dist/unreleased/Helix-<version>-candidate<N>-<target>.zip.
+    Only `promote` puts an archive into dist/ and its SHA256SUMS. Nothing is replaced."""
     cfg = config(["aros_gcc"], args.target)
     root = Path(cfg["build_root"])
     record = json.loads((root / "build.json").read_text())
@@ -549,8 +653,10 @@ def cmd_package(args):
         raise Failure("the binary changed since build.json was written; build again")
     if git(WORK / "helix", "rev-parse", "HEAD").stdout.decode().strip() != record["helix_work_head"]:
         raise Failure("work/helix moved since the build; build again")
-    dist = REPO / "dist"
-    name = f"Helix-{PACKAGE_VERSION}-{args.target}"
+    if record.get("sdk_layout", "skipped") == "skipped":
+        raise Failure("this build did not pass the ABI layout gate; it is for diagnosis only")
+    dist = REPO / "dist" / "unreleased"
+    name = f"Helix-{PACKAGE_VERSION}-candidate{args.candidate}-{args.target}"
     archive = dist / f"{name}.zip"
     if archive.exists():
         raise Failure(f"{archive} exists; delivered archives are never replaced")
@@ -582,8 +688,28 @@ def cmd_package(args):
         dist.mkdir(exist_ok=True)
         run(["zip", "-qrX", archive, "Helix"], cwd=tmp)
         shutil.copyfile(Path(tmp) / "contents.sha256", dist / f"{name}.contents.sha256")
-    with open(dist / "SHA256SUMS", "a") as sums:
+    with open(dist / f"SHA256SUMS-{PACKAGE_VERSION}", "a") as sums:
         sums.write(f"{sha256_file(archive)}  {archive.name}\n")
+    print(archive)
+
+
+def cmd_promote(args):
+    """Copies an accepted candidate unchanged to dist/Helix-<version>-<target>.zip and
+    adds it to dist/SHA256SUMS. Run it only after native acceptance of that archive."""
+    unreleased = REPO / "dist" / "unreleased"
+    source = unreleased / f"Helix-{PACKAGE_VERSION}-candidate{args.candidate}-{args.target}.zip"
+    listed = (unreleased / f"SHA256SUMS-{PACKAGE_VERSION}").read_text().split("\n")
+    digest = sha256_file(source)
+    if f"{digest}  {source.name}" not in listed:
+        raise Failure(f"{source.name} does not match its line in SHA256SUMS-{PACKAGE_VERSION}")
+    name = f"Helix-{PACKAGE_VERSION}-{args.target}"
+    archive, contents = REPO / "dist" / f"{name}.zip", REPO / "dist" / f"{name}.contents.sha256"
+    if archive.exists() or contents.exists():
+        raise Failure(f"{archive} exists; delivered archives are never replaced")
+    shutil.copyfile(source, archive)
+    shutil.copyfile(source.with_name(source.name[:-4] + ".contents.sha256"), contents)
+    with open(REPO / "dist" / "SHA256SUMS", "a") as sums:
+        sums.write(f"{digest}  {archive.name}\n")
     print(archive)
 
 
@@ -598,16 +724,21 @@ def main():
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = p.add_subparsers(dest="command", required=True)
     for name, fn in (("config", cmd_config), ("materialize", cmd_materialize), ("export", cmd_export),
-                     ("verify", cmd_verify), ("build", cmd_build), ("package", cmd_package)):
+                     ("verify", cmd_verify), ("build", cmd_build), ("package", cmd_package),
+                     ("promote", cmd_promote)):
         sp = sub.add_parser(name, help=fn.__doc__)
         sp.set_defaults(fn=fn)
-        if name in ("config", "build", "package"):
+        if name in ("config", "build", "package", "promote"):
             sp.add_argument("--target", choices=sorted(TARGETS), default=DEFAULT_TARGET)
+        if name in ("package", "promote"):
+            sp.add_argument("--candidate", type=int, required=True, help="candidate number")
         if name == "build":
             # Unwind (the default): a panic on the editor thread can then end the
             # program from the main task; AROS cannot abort() from a thread cleanly.
             sp.add_argument("--panic", choices=("unwind", "abort"), default=None)
             sp.add_argument("--probe", help="build experiments/<PROBE> instead of hx")
+            sp.add_argument("--no-abi-gate", action="store_true",
+                            help="skip the layout gate (diagnostic rebuilds only; not packaged)")
     args = p.parse_args()
     try:
         args.fn(args)

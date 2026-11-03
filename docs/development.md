@@ -45,14 +45,28 @@ paths. Every key can also be given as an environment variable; run
     git -C upstream/tree-sitter-rust checkout 1f63b33efee17e833e0ea29266dd3d713e27e321
     python3 scripts/hx.py materialize   # work/helix and work/crates from the series
     python3 scripts/hx.py build         # build/aros-x86_64-abiv11-pc/target/x86_64-aros/release/hx
-    python3 scripts/hx.py package       # dist/Helix-<version>-aros-x86_64-abiv11-pc.zip
+    python3 scripts/hx.py package --candidate 1   # dist/unreleased/Helix-<version>-candidate1-<target>.zip
+    python3 scripts/hx.py promote --candidate 1   # after acceptance: dist/Helix-<version>-<target>.zip
+    python3 scripts/hx.py verify        # every series rebuilds its work copy
 
-For mainline add `--target aros-x86_64-abiv1-pc` to `config`, `build` and
-`package`. Its compiler, SDK, toolchain and rust-aros commit go under
-`"targets": {"aros-x86_64-abiv1-pc": {...}}` in `local.json`. It needs a
+For mainline add `--target aros-x86_64-abiv1-pc` to `config`, `build`,
+`package` and `promote`. Its compiler, SDK, toolchain and rust-aros commit go
+under `"targets": {"aros-x86_64-abiv1-pc": {...}}` in `local.json`. It needs a
 rust-aros commit whose libc-aros has the 168-byte `pthread_attr_t` (43b3798
 or later) and links the SDK's own libpthread.
-    python3 scripts/hx.py verify        # every series rebuilds its work copy
+
+`package` writes candidates and their sums (`SHA256SUMS-<version>`) to
+`dist/unreleased/` only. `promote` copies the tested candidate byte for byte to
+`dist/` and adds it to `dist/SHA256SUMS`; neither replaces an existing file.
+
+Before compiling, `build` checks libc-aros against the SDK (the ABI layout
+gate): the SDK's compiler measures `sizeof`, `_Alignof` and `offsetof` of the
+types and fields in `ABI_TYPES` and `ABI_FIELDS`, and a `cargo check` of
+generated const assertions compares libc-aros with them. A difference stops the
+build and names each layout. The measurements go to `abi-gate/sdk-layout.json`
+in the build root and their hash to `build.json` (`sdk_layout`).
+`--no-abi-gate` exists for diagnostic rebuilds of an earlier input set;
+`package` refuses such a build.
 
 The build stages a copy of the committed work tree, so commit in `work/` before
 building. `build --probe term-probe` builds `experiments/term-probe` with the
