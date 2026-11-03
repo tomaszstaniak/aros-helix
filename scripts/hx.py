@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Helix for AROS: prepare patched sources and build for x86_64 ABIv11.
+"""Helix for AROS: prepare patched sources and build for AROS x86_64 (ABIv11 and ABIv1).
 
 Commands (run `hx.py COMMAND --help`):
   config       show the resolved settings
@@ -40,11 +40,26 @@ AUTHOR = ["-c", "user.name=tomaszstaniak", "-c", "user.email=68373859+tomaszstan
 # upstreams.json id. The revision must be the one Helix's languages.toml names.
 GRAMMARS = {"rust": "tree-sitter-rust"}
 
+# Build targets (names as in AROS-dev coding standards). Per target:
+#   abi_byte    e_ident[EI_ABIVERSION] the AROS linker writes for that ABI
+#   spec        rust-aros file the target JSON is made from
+#   pthread     "patched": link patches/aros-pthread objects ahead of the SDK's
+#               libpthread.a (old ABIv11 SDK); "sdk": the SDK's library as is
+#   wctype_shim the SDK lacks iswalnum and friends (ABIv11); mainline has them inline
+#   panic       default panic strategy
+TARGETS = {
+    "aros-x86_64-abiv11-pc": {"abi_byte": 11, "spec": "x86_64-aros.json.in", "pthread": "patched",
+                              "wctype_shim": True, "panic": "unwind"},
+    "aros-x86_64-abiv1-pc": {"abi_byte": 1, "spec": "profiles/x86_64-v1-pc.json", "pthread": "sdk",
+                             "wctype_shim": False, "panic": "unwind"},
+}
+DEFAULT_TARGET = "aros-x86_64-abiv11-pc"
+
 # key: (environment variable, default, description)
 SETTINGS = {
     "aros_gcc": ("HX_AROS_GCC", None, "x86_64 AROS C compiler driver matching the SDK"),
     "aros_ar": ("HX_AROS_AR", None, "archiver from the same toolchain"),
-    "aros_sdk": ("HX_AROS_SDK", None, "ABIv11 SDK used as --sysroot"),
+    "aros_sdk": ("HX_AROS_SDK", None, "SDK of the target ABI, used as --sysroot"),
     "aros_src": ("HX_AROS_SRC", None, "deadwood2/AROS checkout; read-only source of the pthread link library"),
     "aros_src_commit": ("HX_AROS_SRC_COMMIT", "5376f09bc1ed0c36a12fbb096406013f8a046e89",
                         "commit whose compiler/pthread matches the SDK's libpthread.a"),
@@ -54,25 +69,36 @@ SETTINGS = {
     "rustc_version": ("HX_RUSTC_VERSION", "rustc 1.100.0-nightly (0dfb098f3 2026-08-31)",
                       "exact `rustc --version` the toolchain must report"),
     "cargo_home": ("HX_CARGO_HOME", str(Path.home() / ".cargo"), "CARGO_HOME holding the registry cache"),
-    "build_root": ("HX_BUILD_ROOT", "build/v11", "build outputs (relative: to the repository)"),
+    "build_root": ("HX_BUILD_ROOT", None, "build outputs (relative: to the repository); default build/<target>"),
 }
+# local.json may hold {"targets": {"<target>": {<settings>}}}: those values
+# replace the top-level ones for that target. Environment variables still win.
+
 
 
 class Failure(Exception):
     pass
 
 
-def config(required=()):
+def config(required=(), target=DEFAULT_TARGET):
+    if target not in TARGETS:
+        raise Failure(f"unknown target {target}; known: {', '.join(TARGETS)}")
     path = Path(os.environ.get("HX_LOCAL", REPO / "local.json"))
     local = json.loads(path.read_text()) if path.exists() else {}
+    per_target = local.pop("targets", {})
     unknown = set(local) - set(SETTINGS)
+    unknown |= {f"targets.{t}" for t in per_target if t not in TARGETS}
+    unknown |= {f"targets.{t}.{k}" for t, v in per_target.items() for k in v if k not in SETTINGS}
     if unknown:
         raise Failure(f"{path}: unknown keys {sorted(unknown)}")
-    out = {}
+    local.update(per_target.get(target, {}))
+    out = {"target": target}
     for key, (env, default, _) in SETTINGS.items():
         value = os.environ.get(env) or local.get(key) or default
-        if key in ("build_root",) and value and not Path(value).is_absolute():
-            value = str(REPO / value)
+        if key == "build_root":
+            value = value or f"build/{target}"
+            if not Path(value).is_absolute():
+                value = str(REPO / value)
         out[key] = value
     missing = [f"{k} ({SETTINGS[k][0]} or local.json)" for k in required if not out.get(k)]
     if missing:
@@ -312,8 +338,8 @@ def build_pthread(cfg, root):
 
 
 def build_grammars(cfg, root):
-    """Compiles each linked grammar (parser.c, scanner.c) and the wctype fallback
-    its scanner needs into one archive."""
+    """Compiles each linked grammar (parser.c, scanner.c) into one archive, with
+    the wctype fallback its scanner needs where the SDK lacks those functions."""
     repos = json.loads(UPSTREAMS.read_text())["repositories"]
     out = root / "grammars"
     if out.exists():
@@ -321,8 +347,12 @@ def build_grammars(cfg, root):
     out.mkdir(parents=True)
     shim = REPO / "src/grammars"
     flags = [f"--sysroot={cfg['aros_sdk']}", "-O2", "-fno-PIC", "-std=c11", "-w"]
-    objects = [out / "wctype_aros.o"]
-    run([cfg["aros_gcc"], *flags, "-c", shim / "wctype_aros.c", "-o", objects[0]])
+    shimmed = TARGETS[cfg["target"]]["wctype_shim"]
+    objects, include = [], []
+    if shimmed:
+        objects.append(out / "wctype_aros.o")
+        run([cfg["aros_gcc"], *flags, "-c", shim / "wctype_aros.c", "-o", objects[0]])
+        include = ["-include", shim / "wctype_aros.h"]
     for name, ident in GRAMMARS.items():
         checkout = REPO / "upstream" / ident
         commit = repos[ident]["commit"]
@@ -334,7 +364,7 @@ def build_grammars(cfg, root):
         for part in ("parser", "scanner"):
             if (src / f"{part}.c").exists():
                 obj = out / f"{name}-{part}.o"
-                run([cfg["aros_gcc"], *flags, "-include", shim / "wctype_aros.h", "-I", src,
+                run([cfg["aros_gcc"], *flags, *include, "-I", src,
                      "-c", src / f"{part}.c", "-o", obj])
                 objects.append(obj)
     archive = out / "libhelix-grammars.a"
@@ -342,8 +372,28 @@ def build_grammars(cfg, root):
     return archive
 
 
+def target_spec(cfg, rtree):
+    """The target JSON for cfg's target, from the rust-aros file at the pinned commit."""
+    info = TARGETS[cfg["target"]]
+    if info["spec"].endswith(".in"):
+        return ((rtree / info["spec"]).read_text().replace("@AROS_GCC@", cfg["aros_gcc"])
+                .replace("@AROS_SDK@", cfg["aros_sdk"]).replace("@AROS_EXTRA_LIBS@", ""))
+    # rust-aros profiles carry no machine paths: add the linker and SDK. libpthread
+    # comes last, after libc-aros's objects that call it.
+    spec = json.loads((rtree / info["spec"]).read_text())
+    spec["linker"] = cfg["aros_gcc"]
+    spec["pre-link-args"] = {"gnu-cc": [f"--sysroot={cfg['aros_sdk']}"]}
+    spec["late-link-args"] = {"gnu-cc": ["-lpthread"]}
+    return json.dumps(spec, indent=2, sort_keys=True) + "\n"
+
+
 def cmd_build(args):
-    cfg = config(["aros_gcc", "aros_ar", "aros_sdk", "aros_src", "rust_aros", "rust_aros_commit", "toolchain"])
+    info = TARGETS.get(args.target)
+    needs = ["aros_gcc", "aros_ar", "aros_sdk", "rust_aros", "rust_aros_commit", "toolchain"]
+    if info and info["pthread"] == "patched":
+        needs.append("aros_src")
+    cfg = config(needs, args.target)
+    panic = args.panic or info["panic"]
     for name in ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_RUSTFLAGS", "CARGO_TARGET_DIR"):
         if os.environ.get(name):
             raise Failure(f"clear {name}: it would override the selected profile or output")
@@ -366,7 +416,7 @@ def cmd_build(args):
     rtree = root / f"rust-aros-{rcommit[:12]}"
     if not rtree.exists():
         archive = run(["git", "-C", rust_aros, "archive", "--format=tar", rcommit,
-                       "std-groundwork/libc-aros", "tools/libc-dual.py", "x86_64-aros.json.in"]).stdout
+                       "std-groundwork/libc-aros", "tools/libc-dual.py", info["spec"]]).stdout
         with tempfile.TemporaryDirectory(prefix="rust-aros-", dir=root) as tmp:
             with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
                 tar.extractall(tmp, filter="data")
@@ -375,10 +425,8 @@ def cmd_build(args):
     if not libc.exists():
         run([sys.executable, rtree / "tools/libc-dual.py", rtree / "std-groundwork/libc-aros", libc,
              "--cargo-home", cfg["cargo_home"]])
-    template = (rtree / "x86_64-aros.json.in").read_text()
     target_json = root / "x86_64-aros.json"
-    text = (template.replace("@AROS_GCC@", cfg["aros_gcc"]).replace("@AROS_SDK@", cfg["aros_sdk"])
-            .replace("@AROS_EXTRA_LIBS@", ""))
+    text = target_spec(cfg, rtree)
     if not target_json.exists() or target_json.read_text() != text:
         target_json.write_text(text)
 
@@ -388,21 +436,22 @@ def cmd_build(args):
         dest = root / "crates" / ident
         stage_tree(WORK / "crates" / ident, dest)
         crates[spec["name"]] = dest
-    pthread = build_pthread(cfg, root)
+    pthread = build_pthread(cfg, root) if info["pthread"] == "patched" else None
     grammars = build_grammars(cfg, root)
 
     sysroot = run(["rustc", "+" + cfg["toolchain"], "--print", "sysroot"]).stdout.decode().strip()
     # getrandom 0.3 has no AROS backend: helix-stdx supplies the custom one.
-    flags = ["-Cpanic=" + args.panic, "--cfg", 'getrandom_backend="custom"', "--cfg", "tokio_unstable",
+    flags = ["-Cpanic=" + panic, "--cfg", 'getrandom_backend="custom"', "--cfg", "tokio_unstable",
              f"--remap-path-prefix={src}=/helix", f"--remap-path-prefix={cfg['cargo_home']}=/cargo",
              f"--remap-path-prefix={libc}=/libc-aros", f"--remap-path-prefix={sysroot}=/rust"]
     # The AROS GCC driver searches the SDK's lib/ before any -L, so a patched
     # libpthread.a cannot win the -lpthread lookup. The two patched objects go first
     # on the link line instead: they define every symbol of the SDK's pthread.o and
     # pthread_create.o, so -lpthread pulls neither.
-    if args.panic == "unwind":
+    if panic == "unwind":
         flags.append("-Cforce-unwind-tables=yes")
-    flags.append("-Zpre-link-args=" + " ".join(str(pthread / f"{n}.o") for n in PTHREAD_PATCHED))
+    if pthread:
+        flags.append("-Zpre-link-args=" + " ".join(str(pthread / f"{n}.o") for n in PTHREAD_PATCHED))
     if not args.probe:
         # helix-loader refers to tree_sitter_<name> for each grammar in GRAMMARS.
         flags.append(f"-Clink-arg={grammars}")
@@ -433,7 +482,7 @@ def cmd_build(args):
                         ignore=shutil.ignore_patterns("target", "Cargo.lock"))
         run(cargo + ["generate-lockfile", "--offline"] + patch, cwd=probe_src, env=env, capture=False, check=False)
         command = cargo + ["build", "--release", "--offline", "--target", target_json,
-                           "-Zbuild-std=std,panic_" + args.panic, "-Zjson-target-spec",
+                           "-Zbuild-std=std,panic_" + panic, "-Zjson-target-spec",
                            "--config", "build.rustflags=" + json.dumps(flags)] + patch
         result = run(command, cwd=probe_src, env=dict(env, CARGO_TARGET_DIR=str(root / "probe-target")),
                      capture=False, check=False)
@@ -442,12 +491,15 @@ def cmd_build(args):
         print(root / "probe-target/x86_64-aros/release" / args.probe)
         return
     command = cargo + ["build", "--release", "--offline", "-p", "helix-term", "--no-default-features",
-                       "--target", target_json, "-Zbuild-std=std,panic_" + args.panic, "-Zjson-target-spec",
+                       "--target", target_json, "-Zbuild-std=std,panic_" + panic, "-Zjson-target-spec",
                        "--config", "build.rustflags=" + json.dumps(flags)] + patch
     result = run(command, cwd=src, env=env, capture=False, check=False)
     if result.returncode:
         raise Failure(f"cargo build failed ({result.returncode})")
     binary = root / "target/x86_64-aros/release/hx"
+    abi_byte = binary.read_bytes()[8]
+    if abi_byte != info["abi_byte"]:
+        raise Failure(f"{binary} has ELF ABI version {abi_byte}, {args.target} needs {info['abi_byte']}")
     # Licences of everything compiled into hx, for the archive.
     tree = run(cargo + ["tree", "--offline", "-p", "helix-term", "--no-default-features", "-e", "normal",
                         "--prefix", "none", "--format", "{p}: {l}", "--target", target_json,
@@ -460,29 +512,45 @@ def cmd_build(args):
     (root / "THIRD-PARTY.txt").write_text(
         "Helix for AROS includes these components, under the licences their authors chose.\n"
         "Their full texts are in each component's source.\n\n" + "\n".join(lines) + "\n")
-    record = {"helix_work_head": head, "rust_aros_commit": rcommit, "toolchain": rustc,
+    sdk = Path(cfg["aros_sdk"])
+    record = {"target": args.target, "helix_work_head": head, "rust_aros_commit": rcommit,
+              "toolchain": cfg["toolchain"], "rustc": rustc, "rust_src": tree_hash(Path(sysroot) / "lib/rustlib/src/rust/library"),
+              "panic": panic, "gcc": run([cfg["aros_gcc"], "--version"]).stdout.decode().splitlines()[0],
+              "sdk_libraries": {n: sha256_file(sdk / "lib" / n) for n in ("libpthread.a", "libposixc.a", "libstdc.a")
+                                if (sdk / "lib" / n).exists()},
               "crates": {n: tree_hash(p) for n, p in crates.items()}, "libc": tree_hash(libc),
-              "pthread": str(pthread.name), "binary": str(binary), "sha256": sha256_file(binary),
-              "size": binary.stat().st_size}
+              "pthread": pthread.name if pthread else "SDK libpthread.a", "grammars": sha256_file(grammars),
+              "target_json": sha256_file(target_json),
+              "binary": str(binary), "sha256": sha256_file(binary), "size": binary.stat().st_size}
     (root / "build.json").write_text(json.dumps(record, indent=2) + "\n")
     print(json.dumps(record, indent=2))
 
 
-PACKAGE_VERSION = "25.07.1-aros-preview2-test1"
+PACKAGE_VERSION = "25.07.1-preview2"
+
+# Words the ReadMe template fills in per target.
+README_FIELDS = {
+    "aros-x86_64-abiv11-pc": {"@SYSTEM@": "AROS x86_64 ABIv11 (AROS One and other ABIv11 systems); tested on AROS One 1.3",
+                              "@LIMPET@": "Limpet-0.9.0-aros-x86_64-abiv11-pc.zip"},
+    "aros-x86_64-abiv1-pc": {"@SYSTEM@": "mainline AROS x86_64 (ABIv1); tested on the nightly build of 2026-10-31",
+                             "@LIMPET@": "Limpet-0.9.0-aros-x86_64-abiv1-pc.zip"},
+}
 
 
 def cmd_package(args):
-    """Packs the last build into dist/Helix-<version>-abiv11.zip (never replaced)."""
-    cfg = config(["aros_gcc"])
+    """Packs the last build into dist/Helix-<version>-<target>.zip (never replaced)."""
+    cfg = config(["aros_gcc"], args.target)
     root = Path(cfg["build_root"])
     record = json.loads((root / "build.json").read_text())
+    if record.get("target") != args.target:
+        raise Failure(f"{root}/build.json is for {record.get('target')}, not {args.target}")
     binary = Path(record["binary"])
     if sha256_file(binary) != record["sha256"]:
         raise Failure("the binary changed since build.json was written; build again")
     if git(WORK / "helix", "rev-parse", "HEAD").stdout.decode().strip() != record["helix_work_head"]:
         raise Failure("work/helix moved since the build; build again")
     dist = REPO / "dist"
-    name = f"Helix-{PACKAGE_VERSION}-abiv11"
+    name = f"Helix-{PACKAGE_VERSION}-{args.target}"
     archive = dist / f"{name}.zip"
     if archive.exists():
         raise Failure(f"{archive} exists; delivered archives are never replaced")
@@ -499,7 +567,13 @@ def cmd_package(args):
             shutil.copytree(runtime / "queries" / name_, top / "runtime/queries" / name_)
         shutil.copytree(runtime / "themes", top / "runtime/themes")
         shutil.copyfile(runtime / "tutor", top / "runtime/tutor")
-        shutil.copyfile(REPO / "packaging/ReadMe.txt", top / "ReadMe.txt")
+        readme = (REPO / "packaging/ReadMe.txt").read_text()
+        for word, value in README_FIELDS[args.target].items():
+            readme = readme.replace(word, value)
+        left = re.findall(r"@[A-Z_]+@", readme)
+        if left:
+            raise Failure(f"packaging/ReadMe.txt: no value for {left}")
+        (top / "ReadMe.txt").write_text(readme)
         shutil.copyfile(WORK / "helix" / "LICENSE", top / "LICENSE.txt")
         shutil.copyfile(root / "THIRD-PARTY.txt", top / "THIRD-PARTY.txt")
         contents = sorted(p for p in top.rglob("*") if p.is_file())
@@ -514,7 +588,8 @@ def cmd_package(args):
 
 
 def cmd_config(args):
-    cfg = config()
+    cfg = config(target=args.target)
+    print(f"{'target':18} {cfg['target']}")
     for key, (env, _, description) in SETTINGS.items():
         print(f"{key:18} {cfg.get(key) or '(unset)':60} {env}: {description}")
 
@@ -526,10 +601,12 @@ def main():
                      ("verify", cmd_verify), ("build", cmd_build), ("package", cmd_package)):
         sp = sub.add_parser(name, help=fn.__doc__)
         sp.set_defaults(fn=fn)
+        if name in ("config", "build", "package"):
+            sp.add_argument("--target", choices=sorted(TARGETS), default=DEFAULT_TARGET)
         if name == "build":
-            # Unwind: a panic on the editor thread can then end the program from
-            # the main task; AROS cannot abort() from a thread cleanly.
-            sp.add_argument("--panic", choices=("unwind", "abort"), default="unwind")
+            # Unwind (the default): a panic on the editor thread can then end the
+            # program from the main task; AROS cannot abort() from a thread cleanly.
+            sp.add_argument("--panic", choices=("unwind", "abort"), default=None)
             sp.add_argument("--probe", help="build experiments/<PROBE> instead of hx")
     args = p.parse_args()
     try:

@@ -9,8 +9,8 @@ updated: 2026-10-19
 
 | Target | State |
 |---|---|
-| x86_64 ABIv11 (AROS One 1.3) | built and run |
-| x86_64 mainline (ABIv1) | not built |
+| x86_64 ABIv11 (AROS One 1.3), `aros-x86_64-abiv11-pc` | built and run |
+| x86_64 mainline (ABIv1), `aros-x86_64-abiv1-pc` | built and run (nightly 20261031) |
 | aarch64 | not built |
 
 ABIv11 comes first because the terminal (Limpet) and the Rust environment are
@@ -44,8 +44,14 @@ paths. Every key can also be given as an environment variable; run
     git clone https://github.com/tree-sitter/tree-sitter-rust upstream/tree-sitter-rust
     git -C upstream/tree-sitter-rust checkout 1f63b33efee17e833e0ea29266dd3d713e27e321
     python3 scripts/hx.py materialize   # work/helix and work/crates from the series
-    python3 scripts/hx.py build         # build/v11/target/x86_64-aros/release/hx
-    python3 scripts/hx.py package       # dist/Helix-<version>-abiv11.zip
+    python3 scripts/hx.py build         # build/aros-x86_64-abiv11-pc/target/x86_64-aros/release/hx
+    python3 scripts/hx.py package       # dist/Helix-<version>-aros-x86_64-abiv11-pc.zip
+
+For mainline add `--target aros-x86_64-abiv1-pc` to `config`, `build` and
+`package`. Its compiler, SDK, toolchain and rust-aros commit go under
+`"targets": {"aros-x86_64-abiv1-pc": {...}}` in `local.json`. It needs a
+rust-aros commit whose libc-aros has the 168-byte `pthread_attr_t` (43b3798
+or later) and links the SDK's own libpthread.
     python3 scripts/hx.py verify        # every series rebuilds its work copy
 
 The build stages a copy of the committed work tree, so commit in `work/` before
