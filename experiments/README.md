@@ -105,4 +105,6 @@ was in the same loop (+0x16C against +0x169). Mainline nightly 20261031
 (debug.library 2.3) ran the same 200 s without failure; mainline 1c25bf6c16
 builds the array before listing the module. `DETECT` saw nothing in 54 loads,
 so it cannot show the absence of the window. Builds since then use
-`-Zfunction-sections=no` (7 loadable sections).
+`-Zfunction-sections=no` (7 loadable sections); that shortens the window but
+does not close it: `CRASH` with such a build also failed, on a module of 6
+segments.
