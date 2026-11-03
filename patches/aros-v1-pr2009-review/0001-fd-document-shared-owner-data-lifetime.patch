@@ -1,0 +1,52 @@
+From 457b4313452d3e73c67c45f8a2ea102cf644ccb5 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 17:17:32 +0100
+Subject: [PATCH] fd: document shared owner data lifetime for retained
+ reservations
+
+---
+ workbench/libs/fd/fd_alloc.c   | 8 ++++++++
+ workbench/libs/fd/include/fd.h | 8 +++++++-
+ 2 files changed, 15 insertions(+), 1 deletion(-)
+
+diff --git a/workbench/libs/fd/fd_alloc.c b/workbench/libs/fd/fd_alloc.c
+index dd1d4ae4b4..1a7eed3d06 100644
+--- a/workbench/libs/fd/fd_alloc.c
++++ b/workbench/libs/fd/fd_alloc.c
+@@ -492,6 +492,14 @@ static fd_entry *fd_get_entry(struct fd_base *base, LONG fd)
+         inheriting the same descriptor number. FD_Free releases one reference;
+         the number remains reserved until the last reference is released.
+ 
++        The owner data pointer is shared by all references to the reservation;
++        retaining a number does not retain or copy the object it points to.
++        The owner must keep that object valid until the final FD_Free(), or
++        use NULL as the owner data. A non-final FD_Free() leaves the data
++        pointer unchanged. FD_SetData() replaces it for every reference, not
++        just the calling table. Owners must synchronize data replacement and
++        object destruction with their hook users under their own lock.
++
+     INPUTS
+         fd - Existing descriptor number.
+         owner - Expected descriptor owner.
+diff --git a/workbench/libs/fd/include/fd.h b/workbench/libs/fd/include/fd.h
+index 5479bb8f14..f4ed0bd1e2 100644
+--- a/workbench/libs/fd/include/fd.h
++++ b/workbench/libs/fd/include/fd.h
+@@ -61,7 +61,13 @@ LONG FD_Alloc(LONG startfd, fd_owner_t owner, APTR data, LONG *outfd);
+ LONG FD_Reserve(LONG fd, fd_owner_t owner, APTR data);
+ LONG FD_Free(LONG fd, fd_owner_t owner);
+ /* Version 51: retain an existing reservation for an inherited descriptor.
+-   Each successful retain must be balanced by FD_Free(). */
++   Each successful retain must be balanced by FD_Free(). All references share
++   one owner data pointer; retaining the number does not retain or copy its
++   object. The owner must keep the object valid until the final FD_Free(), or
++   use NULL as the owner data. A non-final FD_Free() leaves the pointer unchanged.
++   FD_SetData() replaces the pointer for all references. The owner must
++   synchronize replacement and object destruction with hook users under its
++   own lock; checking FD_GetData() alone does not keep the object alive. */
+ LONG FD_Retain(LONG fd, fd_owner_t owner);
+ LONG FD_Check(LONG fd);
+ fd_owner_t FD_GetOwner(LONG fd);
+-- 
+2.54.0 (Apple Git-157)
+

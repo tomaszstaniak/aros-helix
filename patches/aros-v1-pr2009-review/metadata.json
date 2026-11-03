@@ -1,0 +1,12 @@
+{
+  "id": "aros-pr2009-owner-data-contract",
+  "upstream": "https://github.com/aros-development-team/AROS",
+  "base": "2a14545ada9d766c09e41f91b126d2aea70a95cc",
+  "status": "upstream",
+  "submission_url": "https://github.com/aros-development-team/AROS/pull/2009",
+  "submission_revision": "457b4313452d3e73c67c45f8a2ea102cf644ccb5",
+  "checked_date": "2026-11-03",
+  "v1_applicability": "Documents existing FD_Retain shared owner-data lifetime; no executable changes.",
+  "validation": "Actual workbench-libs-fd target compiled and linked with x86_64 ABIv1 GCC 10.5.0 and -Werror=implicit-function-declaration. ABIv11 GCC 10.5.0 located and verified, but its existing fd mmakefile disables the module target; no ABIv11 build or runtime claimed. No new runtime tests for this comment-only change.",
+  "next_action": "Maintainer review of the documented contract."
+}
