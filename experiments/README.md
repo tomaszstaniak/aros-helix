@@ -77,5 +77,9 @@ thread-probe`, then `thread-probe spawn|catch|tcatch|fs FILE N|fsc FILE N|tokio 
 Found (2026-11-03, v1 nightly 20261031): with rust-aros libc-aros 79324c2
 `spawn` ended the creating task at PC 0, because mainline's `pthread_attr_t`
 grew to 168 bytes (rust-aros 43b3798 fixes it). With the fix, spawn, `fs`,
-`fsc` and `tokio` pass 50, 50 and 4 rounds; a panic in a thread is not
-caught on v1 (`tcatch` aborts).
+`fsc` and `tokio` ended with status 0 after 50, 50 and 4 rounds; a panic in
+a thread is not caught on v1 (`tcatch` aborts).
+That version printed some failures (a failed read, join or nested task) and
+still ended with status 0, so those runs do not exclude failed rounds. Since
+2026-11-03 every round prints `ok` or `FAIL`, any failure gives status 10 and
+an unknown mode or bad arguments 20; keep the whole output with the status.
