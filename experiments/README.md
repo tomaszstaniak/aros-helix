@@ -96,7 +96,13 @@ is complete, so that a task ending at that moment fails in
 Run: `x86_64-aros-gcc --sysroot=SDK -O2 -o modrace modrace/modrace.c`, then
 `modrace CRASH FILE SECONDS` (public calls only: two processes load and unload
 FILE while short `NP_Entry` processes end) or `modrace DETECT FILE SECONDS`
-(walks debug.library's private module list; read-only).
+(walks debug.library's private module list; read-only). Status 0 means no
+failure and every child gone from exec's task lists; 20 a usage error, a
+child that did not start, or a child still listed 30 s after it returned. The
+counts say how many children returned, not how many were reaped. Before
+2026-11-03 night a failed second loader start left the first one running and
+the end of the test was a fixed delay; runs before that change rely on the
+crash itself, not on a clean end.
 Found (2026-11-03): on AROS One 1.3 (debug.library 2.1, 01/30/26) `CRASH`
 with hx candidate 2 (12 371 loadable sections) as FILE ended in a Software
 Failure in `Debug_6_UnregisterModule` with RAX=0 and RSI=0x3052: a module with

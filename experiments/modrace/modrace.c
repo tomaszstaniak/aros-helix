@@ -18,6 +18,15 @@
  *       otherwise it prints the counts and ends with status 0.
  *
  * Nothing is written to disk. Children use exec and dos only.
+ *
+ * Ending: a child's last act is to count itself out inside Forbid() and return
+ * without Permit(), so the main task does not run again until that child has
+ * left this program's code. The counts therefore mean "returned", not "ended".
+ * Before it returns, the main task also waits until no task with a child's name
+ * is left in exec's task lists (FindTask under Forbid), for up to END_WAIT
+ * seconds; if one is still there it says so and ends with status 20 rather than
+ * pretend the test finished. A loader that fails to start stops the others the
+ * same way before the program ends.
  */
 #include <exec/types.h>
 #include <exec/lists.h>
@@ -52,8 +61,11 @@ struct dbg_base {
 static const char *file;
 static volatile int stop;
 static volatile ULONG loads, load_fail, procs_done;
-static volatile LONG running;   /* loader processes still in their loop */
-static volatile LONG alive;     /* short processes not yet returned */
+static volatile LONG running;   /* loader processes started and not yet returned */
+static volatile LONG alive;     /* short processes started and not yet returned */
+
+#define END_WAIT 30             /* seconds to wait for children to leave the task lists */
+static const char *const child_names[] = { "modrace loader 1", "modrace loader 2", "modrace short" };
 
 static void loader(void)
 {
@@ -65,9 +77,10 @@ static void loader(void)
         } else
             load_fail++;
     }
+    /* No Permit(): the main task runs again only once this process has left
+       this function (ending a task ends its Forbid). */
     Forbid();
     running--;
-    Permit();
 }
 
 static void short_proc(void)
@@ -75,7 +88,6 @@ static void short_proc(void)
     Forbid();
     alive--;
     procs_done++;
-    Permit();
 }
 
 static int start(void (*entry)(void), const char *name)
@@ -84,6 +96,48 @@ static int start(void (*entry)(void), const char *name)
                                           NP_StackSize, 16384, NP_Output, 0, NP_Input, 0,
                                           NP_CloseOutput, FALSE, NP_CloseInput, FALSE, TAG_END);
     return p != NULL;
+}
+
+/* Starts a loader counted in `running`; the count is taken before the start so
+   the loader can never count itself out first, and given back if it fails. */
+static int start_loader(const char *name)
+{
+    Forbid();
+    running++;
+    Permit();
+    if (start(loader, name))
+        return 1;
+    Forbid();
+    running--;
+    Permit();
+    return 0;
+}
+
+/* Stops the loaders and waits until every child has returned and no task with a
+   child's name is left. 0 when they are gone, 20 (with a message) otherwise. */
+static ULONG now_seconds(void);
+static int stop_children(void)
+{
+    ULONG limit;
+    int i, left;
+
+    stop = 1;
+    while (running || alive)
+        Delay(5);
+    limit = now_seconds() + END_WAIT;
+    do {
+        left = 0;
+        Forbid();
+        for (i = 0; i < (int)(sizeof child_names / sizeof child_names[0]); i++)
+            if (FindTask((CONST_STRPTR)child_names[i]))
+                left = i + 1;
+        Permit();
+        if (!left)
+            return 0;
+        Delay(5);
+    } while (now_seconds() < limit);
+    printf("modrace: \"%s\" still in the task lists %d s after it returned\n", child_names[left - 1], END_WAIT);
+    return 20;
 }
 
 static ULONG now_seconds(void)
@@ -130,8 +184,7 @@ int main(int argc, char **argv)
         char first[64] = "";
         if (!db)
             return usage("debug.library does not open");
-        running = 1;
-        if (!start(loader, "modrace loader")) {
+        if (!start_loader(child_names[0])) {
             CloseLibrary(&db->db_Lib);
             return usage("loader process not created");
         }
@@ -164,9 +217,10 @@ int main(int argc, char **argv)
                     max_mods = count;
             }
         }
-        stop = 1;
-        while (running)
-            Delay(5);
+        if (stop_children()) {
+            CloseLibrary(&db->db_Lib);
+            return 20;
+        }
         CloseLibrary(&db->db_Lib);
         printf("modrace DETECT: %lu loads (%lu failed), %lu walks (up to %lu modules)\n",
                (unsigned long)loads, (unsigned long)load_fail, (unsigned long)walks, (unsigned long)max_mods);
@@ -177,9 +231,8 @@ int main(int argc, char **argv)
         return null_array || null_entry ? 10 : 0;
     }
 
-    running = 2;
-    if (!start(loader, "modrace loader 1") || !start(loader, "modrace loader 2")) {
-        stop = 1;
+    if (!start_loader(child_names[0]) || !start_loader(child_names[1])) {
+        stop_children();
         return usage("loader processes not created");
     }
     {
@@ -189,7 +242,7 @@ int main(int argc, char **argv)
                 Forbid();
                 alive++;
                 Permit();
-                if (start(short_proc, "modrace short"))
+                if (start(short_proc, child_names[2]))
                     started++;
                 else {
                     Forbid();
@@ -200,11 +253,9 @@ int main(int argc, char **argv)
             } else
                 Delay(1);
         }
-        stop = 1;
-        while (running || alive)
-            Delay(5);
-        Delay(50); /* let the last short processes finish their exit */
-        printf("modrace CRASH: %lu loads (%lu failed), %lu short processes started, %lu ended, %lu not created\n",
+        if (stop_children())
+            return 20;
+        printf("modrace CRASH: %lu loads (%lu failed), %lu short processes started, %lu returned, %lu not created\n",
                (unsigned long)loads, (unsigned long)load_fail, (unsigned long)started,
                (unsigned long)procs_done, (unsigned long)failed);
         printf("result: no failure\n");
