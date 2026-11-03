@@ -1,0 +1,15 @@
+{
+  "id": "aros-pr2012-codacy-review",
+  "upstream": "https://github.com/aros-development-team/AROS",
+  "base": "64cccb35c8ad48878f11228f56efd0a922c63a3b",
+  "status": "candidate",
+  "v1_applicability": "Review follow-up for existing mainline PR; preserves production behavior and fixes test integration/readability where applicable.",
+  "checked_upstream": "64cccb35c8ad48878f11228f56efd0a922c63a3b",
+  "checked_date": "2026-11-03",
+  "validation": "GCC10.5 actual affected target builds/links: 1 successful combinations. Targets: vfork_context. Pre-existing v11 private-header exclusions: vfork_context (libraries/posixc.h absent; original source fails identically). No guest runtime repeated.",
+  "related_submission": "https://github.com/aros-development-team/AROS/pull/2012",
+  "next_action": "Publish saved follow-up on existing PR2012; keep current readiness and qualification limits.",
+  "review_source_sha256": {
+    "developer/debug/test/crt/posixc/vfork_context.c": "38707b449023177267140e357dcafde08de6ade61f04b71bb41c6a5b5783e6d7"
+  }
+}

@@ -1,0 +1,56 @@
+Subject: [PATCH] tests: restore CRT helper includes and narrow temporary scopes
+
+Base-Commit: 79cb32d86623b874df47f165d429cc01bc942b61
+Related-PR: https://github.com/aros-development-team/AROS/pull/2015
+
+diff --git a/developer/debug/test/crt/posixc/mmakefile.src b/developer/debug/test/crt/posixc/mmakefile.src
+--- a/developer/debug/test/crt/posixc/mmakefile.src
++++ b/developer/debug/test/crt/posixc/mmakefile.src
+@@ -165,6 +165,7 @@
+ #MM : includes linklibs
+ #MM test-crt-posixc-close-pipe-progress : includes linklibs
+ 
++USER_INCLUDES := -I$(SRCDIR)/$(CURDIR)/..
+ USER_CPPFLAGS := -D_GNU_SOURCE
+ %build_prog mmake=test-crt-posixc-vfork-fd-thread \
+     progname=vfork_fd_thread files=vfork_fd_thread targetdir=$(EXEDIR) uselibs="pthread"
+diff --git a/developer/debug/test/crt/posixc/vfork_context.c b/developer/debug/test/crt/posixc/vfork_context.c
+--- a/developer/debug/test/crt/posixc/vfork_context.c
++++ b/developer/debug/test/crt/posixc/vfork_context.c
+@@ -66,7 +66,6 @@
+             int status = -1;
+             int saved_errno;
+             volatile unsigned int polls = 0;
+-            long long now;
+             volatile long long deadline = milliseconds();
+ 
+             TEST(deadline >= 0);
+@@ -88,6 +87,8 @@
+ 
+             do
+             {
++                long long now;
++
+                 errno = 0;
+                 waited = waitpid(child, &status, WNOHANG);
+                 saved_errno = errno;
+diff --git a/developer/debug/test/crt/posixc/vfork_fd.c b/developer/debug/test/crt/posixc/vfork_fd.c
+--- a/developer/debug/test/crt/posixc/vfork_fd.c
++++ b/developer/debug/test/crt/posixc/vfork_fd.c
+@@ -79,7 +79,6 @@
+     int result;
+     int saved_errno;
+     unsigned char byte = 0;
+-    pid_t child;
+ 
+     TEST(pipe(descriptors) == 0);
+     snprintf(reader, sizeof(reader), "%d", descriptors[0]);
+@@ -91,7 +90,7 @@
+ 
+     if (mode != 0)
+     {
+-        child = vfork();
++        pid_t child = vfork();
+         if (child == 0)
+         {
+             if (mode == 1)

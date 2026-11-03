@@ -1,0 +1,25 @@
+Subject: [PATCH] tests: scope the vfork polling timestamp to its loop
+
+Base-Commit: 64cccb35c8ad48878f11228f56efd0a922c63a3b
+Related-PR: https://github.com/aros-development-team/AROS/pull/2012
+
+diff --git a/developer/debug/test/crt/posixc/vfork_context.c b/developer/debug/test/crt/posixc/vfork_context.c
+--- a/developer/debug/test/crt/posixc/vfork_context.c
++++ b/developer/debug/test/crt/posixc/vfork_context.c
+@@ -66,7 +66,6 @@
+             int status = -1;
+             int saved_errno;
+             volatile unsigned int polls = 0;
+-            long long now;
+             volatile long long deadline = milliseconds();
+ 
+             TEST(deadline >= 0);
+@@ -88,6 +87,8 @@
+ 
+             do
+             {
++                long long now;
++
+                 errno = 0;
+                 waited = waitpid(child, &status, WNOHANG);
+                 saved_errno = errno;

@@ -38,3 +38,7 @@ commits after the base are the patches.
    directory and checks that it gives the work copies' committed trees.
 
 `upstream/` stays a clean checkout of the pin.
+
+## AROS review follow-ups
+
+The independent `patches/aros-v1-pr*-review/` series preserve follow-ups to the AROS CRT submissions. Each metadata.json pins the full PR head before the follow-up and records its validation and submission URL/revision. Apply a series to its own declared base. These system-review records are outside the application build dependencies.

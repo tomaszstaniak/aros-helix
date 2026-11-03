@@ -1,0 +1,44 @@
+Subject: [PATCH] tests: restore CRT helper includes and narrow temporary scopes
+
+Base-Commit: 13a018a8e48ff68837e934cfe560554a921f3e5f
+Related-PR: https://github.com/aros-development-team/AROS/pull/2026
+
+diff --git a/developer/debug/test/crt/posixc/exec_closed_stdin.c b/developer/debug/test/crt/posixc/exec_closed_stdin.c
+--- a/developer/debug/test/crt/posixc/exec_closed_stdin.c
++++ b/developer/debug/test/crt/posixc/exec_closed_stdin.c
+@@ -22,11 +22,13 @@
+     char *const arguments[] = {program, "--child", NULL};
+     char *const environment[] = {NULL};
+     pid_t child, waited = 0;
+-    int status = -1, original_flags, result, error;
++    int status = -1, original_flags, error;
+     unsigned int polls;
+ 
+     if (argc == 2 && strcmp(argv[1], "--child") == 0)
+     {
++        int result;
++
+         errno = 0;
+         result = fcntl(STDIN_FILENO, F_GETFD);
+         error = errno;
+diff --git a/developer/debug/test/crt/posixc/mmakefile.src b/developer/debug/test/crt/posixc/mmakefile.src
+--- a/developer/debug/test/crt/posixc/mmakefile.src
++++ b/developer/debug/test/crt/posixc/mmakefile.src
+@@ -158,5 +158,6 @@
+ 
+ #MM- test-crt-posixc : test-crt-posixc-stdio-closed
+ #MM test-crt-posixc-stdio-closed : includes linklibs
++USER_INCLUDES := -I$(SRCDIR)/$(CURDIR)/..
+ USER_CPPFLAGS := -D_GNU_SOURCE
+ %build_prog mmake=test-crt-posixc-stdio-closed progname=stdio_closed files=stdio_closed targetdir=$(EXEDIR) uselibs="pthread"
+diff --git a/developer/debug/test/crt/posixc/test_stdio_init.py b/developer/debug/test/crt/posixc/test_stdio_init.py
+--- a/developer/debug/test/crt/posixc/test_stdio_init.py
++++ b/developer/debug/test/crt/posixc/test_stdio_init.py
+@@ -1,5 +1,6 @@
+ #!/usr/bin/env python3
+-"""Compile actual stdio sources against host shims; reject early errno access.
++"""
++Compile actual stdio sources against host shims; reject early errno access.
+ 
+ Run with an optional source-tree path. Before the fix mask1 aborts inside
+ fdopen; after the fix all eight masks initialize three FILE wrappers without
