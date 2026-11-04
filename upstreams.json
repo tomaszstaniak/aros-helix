@@ -12,6 +12,12 @@
       "commit": "1f63b33efee17e833e0ea29266dd3d713e27e321",
       "license": "MIT",
       "role": "unmodified grammar linked into hx for AROS; the revision Helix 25.07.1's languages.toml names"
+    },
+    "tree-sitter-wasm": {
+      "url": "https://github.com/wasm-lsp/tree-sitter-wasm.git",
+      "commit": "2ca28a9f9d709847bf7a3de0942a84e912f59088",
+      "license": "Apache-2.0 WITH LLVM-exception",
+      "role": "unmodified grammar (directory wat) linked into hx for AROS; the revision Helix 25.07.1's languages.toml names"
     }
   },
   "build_environment": {

@@ -39,8 +39,9 @@ PTHREAD_PATCHED = ("pthread", "pthread_create")
 AUTHOR = ["-c", "user.name=tomaszstaniak", "-c", "user.email=68373859+tomaszstaniak@users.noreply.github.com"]
 
 # Grammars linked into hx, since AROS cannot load shared libraries: name ->
-# upstreams.json id. The revision must be the one Helix's languages.toml names.
-GRAMMARS = {"rust": "tree-sitter-rust"}
+# (upstreams.json id, directory of the grammar in that repository). The revision
+# must be the one Helix's languages.toml names.
+GRAMMARS = {"rust": ("tree-sitter-rust", ""), "wat": ("tree-sitter-wasm", "wat")}
 
 # Build targets (names as in AROS-dev coding standards). Per target:
 #   abi_byte    e_ident[EI_ABIVERSION] the AROS linker writes for that ABI
@@ -427,14 +428,14 @@ def build_grammars(cfg, root):
         objects.append(out / "wctype_aros.o")
         run([cfg["aros_gcc"], *flags, "-c", shim / "wctype_aros.c", "-o", objects[0]])
         include = ["-include", shim / "wctype_aros.h"]
-    for name, ident in GRAMMARS.items():
+    for name, (ident, subdir) in GRAMMARS.items():
         checkout = REPO / "upstream" / ident
         commit = repos[ident]["commit"]
         if git(checkout, "rev-parse", "HEAD").stdout.decode().strip() != commit:
             raise Failure(f"{checkout} is not at the pinned {commit}")
         if git(checkout, "status", "--porcelain").stdout.strip():
             raise Failure(f"{checkout} has local changes; it must stay clean")
-        src = checkout / "src"
+        src = checkout / subdir / "src"
         for part in ("parser", "scanner"):
             if (src / f"{part}.c").exists():
                 obj = out / f"{name}-{part}.o"
@@ -444,6 +445,17 @@ def build_grammars(cfg, root):
     archive = out / "libhelix-grammars.a"
     run([cfg["aros_ar"], "rcs", archive, *objects])
     return archive
+
+
+def build_launcher(cfg, root):
+    """Compiles src/launcher/hx.c, the program that starts hx-editor with the stack it needs."""
+    out = root / "launcher"
+    out.mkdir(parents=True, exist_ok=True)
+    binary = out / "hx"
+    run([cfg["aros_gcc"], f"--sysroot={cfg['aros_sdk']}", "-O2", "-Wall", "-Wextra", "-Werror",
+         "-Werror=implicit-function-declaration", f"-ffile-prefix-map={REPO}=/aros-helix",
+         "-o", binary, REPO / "src/launcher/hx.c"])
+    return binary
 
 
 def target_spec(cfg, rtree):
@@ -614,6 +626,7 @@ def cmd_build(args):
     pthread = build_pthread(cfg, root) if info["pthread"] == "patched" else None
     unwind_fix = build_unwind_fix(cfg, root) if info["unwind_fix"] else None
     grammars = build_grammars(cfg, root)
+    launcher = build_launcher(cfg, root)
 
     sysroot = run(["rustc", "+" + cfg["toolchain"], "--print", "sysroot"]).stdout.decode().strip()
     # getrandom 0.3 has no AROS backend: helix-stdx supplies the custom one.
@@ -706,7 +719,7 @@ def cmd_build(args):
                         "-Zjson-target-spec"] + patch, cwd=src, env=env).stdout.decode()
     # Drop local paths and "(*)" marks: "helix-core v25.7.1 (/...): MPL-2.0".
     lines = sorted({re.sub(r" \([^)]*\)", "", line) for line in tree.splitlines() if line.strip()})
-    for name, ident in GRAMMARS.items():
+    for name, (ident, _) in GRAMMARS.items():
         repo = json.loads(UPSTREAMS.read_text())["repositories"][ident]
         lines.append(f"{ident} {repo['commit'][:12]}: {repo['license']}")
     (root / "THIRD-PARTY.txt").write_text(
@@ -723,6 +736,7 @@ def cmd_build(args):
               "unwinder": sha256_file(unwind_fix) if unwind_fix else "toolchain libgcc", "grammars": sha256_file(grammars),
               "target_json": sha256_file(target_json), "sdk_layout": sdk_layout,
               "variant": "lsp-experimental" if args.lsp_experimental else "default",
+              "launcher": str(launcher), "launcher_sha256": sha256_file(launcher),
               "binary": str(binary), "sha256": sha256_file(binary), "size": binary.stat().st_size}
     (root / "build.json").write_text(json.dumps(record, indent=2) + "\n")
     print(json.dumps(record, indent=2))
@@ -761,6 +775,13 @@ def cmd_package(args):
                       "--lsp-experimental must match it")
     if lsp and not args.server:
         raise Failure("--lsp-experimental needs --server (the language server build record, JSON)")
+    if (args.iteration is None) == (args.candidate is None):
+        raise Failure("give either --candidate N or --iteration N")
+    if args.iteration is not None:
+        if not lsp or args.unstripped:
+            raise Failure("--iteration packs the LSP build (--lsp-experimental), stripped")
+        package_iteration(args, cfg, root, record, binary)
+        return
     dist = REPO / "dist" / "unreleased"
     variant = "-unstripped" if args.unstripped else ""
     kind = "lsp-experimental" if lsp else "candidate"
@@ -804,6 +825,80 @@ def cmd_package(args):
         shutil.copyfile(Path(tmp) / "contents.sha256", dist / f"{name}.contents.sha256")
     with open(dist / f"SHA256SUMS-{PACKAGE_VERSION}", "a") as sums:
         sums.write(f"{sha256_file(archive)}  {archive.name}\n")
+    print(archive)
+
+
+# Archive suffix per target in the port's iteration names (Helix-25.07.1-aros1-abiv11.zip).
+ITERATION_ABI = {"aros-x86_64-abiv11-pc": "abiv11", "aros-x86_64-abiv1-pc": "abiv1"}
+
+
+def package_iteration(args, cfg, root, record, binary):
+    """Packs port iteration N straight into dist/: Helix-25.07.1-aros<N>-<abi>.zip, its
+    contents list, and a line in dist/SHA256SUMS. Being in dist/ is not a publication.
+    The drawer `Helix` holds the launcher `hx`, the editor `hx-editor`, the language
+    server `wat_server` (Helix's default command for .wat), runtime files for the linked
+    grammars, the example, licences and the ReadMe. Nothing is replaced."""
+    launcher = Path(record["launcher"])
+    if sha256_file(launcher) != record["launcher_sha256"]:
+        raise Failure("the launcher changed since build.json was written; build again")
+    # --draft: the same archive under the build root, for tests before delivery.
+    dist = root / "draft" if args.draft else REPO / "dist"
+    dist.mkdir(exist_ok=True)
+    name = f"Helix-25.07.1-aros{args.iteration}-{ITERATION_ABI[args.target]}"
+    archive, listing, sums = dist / f"{name}.zip", dist / f"{name}.contents.sha256", dist / "SHA256SUMS"
+    if archive.exists() or listing.exists() or (sums.exists() and f"  {archive.name}\n" in sums.read_text()):
+        raise Failure(f"{archive} exists; delivered archives are never replaced")
+    server = json.loads(Path(args.server).read_text())
+    if sha256_file(server["binary"]) != server["sha256"]:
+        raise Failure(f"{server['binary']} does not match the sha256 in {args.server}")
+    extra = REPO / "packaging/iteration"
+    with tempfile.TemporaryDirectory(prefix="hx-package-") as tmp:
+        top = Path(tmp) / "Helix"
+        (top / "runtime").mkdir(parents=True)
+        # The full strip leaves a file AROS loads without its relocations.
+        run([cfg["aros_gcc"].replace("-gcc", "-strip"), "--strip-unneeded", "--remove-section", ".comment",
+             "-o", top / "hx-editor", binary])
+        shutil.copyfile(launcher, top / "hx")
+        shutil.copyfile(server["binary"], top / "wat_server")
+        for exe in ("hx", "hx-editor", "wat_server"):
+            # UnZip restores these bits on AROS; without x the file has no `e` bit.
+            (top / exe).chmod(0o755)
+        runtime = WORK / "helix" / "runtime"
+        for grammar in GRAMMARS:
+            shutil.copytree(runtime / "queries" / grammar, top / "runtime/queries" / grammar)
+        shutil.copytree(runtime / "themes", top / "runtime/themes")
+        shutil.copyfile(runtime / "tutor", top / "runtime/tutor")
+        readme = (extra / "ReadMe.txt").read_text()
+        for word, value in README_FIELDS[args.target].items():
+            readme = readme.replace(word, value)
+        left = re.findall(r"@[A-Z_]+@", readme)
+        if left:
+            raise Failure(f"packaging/iteration/ReadMe.txt: no value for {left}")
+        (top / "ReadMe.txt").write_text(readme)
+        shutil.copyfile(extra / "example.wat", top / "example.wat")
+        shutil.copyfile(WORK / "helix" / "LICENSE", top / "LICENSE.txt")
+        shutil.copyfile(root / "THIRD-PARTY.txt", top / "THIRD-PARTY.txt")
+        shutil.copyfile(server["license"], top / "wat_server-LICENSE.txt")
+        shutil.copyfile(server["third_party"], top / "wat_server-THIRD-PARTY.txt")
+        # Licence texts of the grammars compiled into hx-editor.
+        (top / "licenses").mkdir()
+        for ident, _ in GRAMMARS.values():
+            text = (REPO / "upstream" / ident / "LICENSE").read_text()
+            # A LICENSE that is only an SPDX line gets the full text from packaging/licenses.
+            spdx = re.fullmatch(r"SPDX-License-Identifier: (.+)\n?", text)
+            if spdx:
+                full = REPO / "packaging/licenses" / (spdx.group(1).replace(" ", "-") + ".txt")
+                if not full.exists():
+                    raise Failure(f"{ident}: no licence text {full} for {spdx.group(1)}")
+                text += "\n" + full.read_text()
+            (top / "licenses" / f"{ident}.txt").write_text(text)
+        contents = sorted(p for p in top.rglob("*") if p.is_file())
+        (Path(tmp) / "contents.sha256").write_text("".join(
+            f"{sha256_file(p)}  {p.relative_to(tmp).as_posix()}\n" for p in contents))
+        run(["zip", "-qrX", archive, top.name], cwd=tmp)
+        shutil.copyfile(Path(tmp) / "contents.sha256", listing)
+    with open(sums, "a") as out:
+        out.write(f"{sha256_file(archive)}  {archive.name}\n")
     print(archive)
 
 
@@ -966,11 +1061,17 @@ def main():
         sp.set_defaults(fn=fn)
         if name in ("config", "build", "package", "promote"):
             sp.add_argument("--target", choices=sorted(TARGETS), default=DEFAULT_TARGET)
-        if name in ("package", "promote"):
+        if name == "promote":
             sp.add_argument("--candidate", type=int, required=True, help="candidate number")
+        if name == "package":
+            sp.add_argument("--candidate", type=int, help="candidate number (dist/unreleased)")
+            sp.add_argument("--iteration", type=int,
+                            help="port iteration N: Helix-25.07.1-aros<N>-<abi>.zip straight into dist/")
+            sp.add_argument("--draft", action="store_true",
+                            help="with --iteration: write to <build root>/draft instead of dist/ (tests)")
         if name in ("build", "package"):
             sp.add_argument("--lsp-experimental", action="store_true",
-                            help="the experimental LSP variant (language servers only; never promoted)")
+                            help="the LSP build (language servers start; formatters, :sh, :pipe and debug adapters do not)")
         if name == "package":
             sp.add_argument("--server", help="language server build record (JSON) for --lsp-experimental")
             sp.add_argument("--unstripped", action="store_true",
