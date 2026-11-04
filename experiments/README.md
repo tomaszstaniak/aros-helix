@@ -142,11 +142,39 @@ the backtrace walks 7 frames, and `catch` and `tcatch` catch the panic.
 ## conexit
 
 Question: does hx's console pattern at exit raise the v1 DOS alert when run
-again and again in one Shell? `conexit A|B|J MS`: a detached pthread (16 MiB
-stack) waits with WaitForChar(250 ms), reads, and sends the CONG geometry packet
-after empty slices, as libc-aros's poll and TIOCGWINSZ do; the main task sets
-raw mode with tcsetattr, writes frames, then stops the thread, restores cooked
-mode and returns without joining (A), in the other order (B), or with a join
-(J). Found (2026-11-04, nightly 20261031, Limpet 0.9.0): 51 runs in one Shell,
-all clean. The hx alert appears only in sessions started within the first
-minutes after boot, so the probe needs that timing too.
+again and again in one Shell? `conexit A|B|J MS [M|E]`: a detached pthread
+(16 MiB stack) waits with WaitForChar(250 ms), reads, and sends the CONG
+geometry packet after empty slices, as libc-aros's poll and TIOCGWINSZ do; the
+console owner sets raw mode with tcsetattr, writes frames, then stops the
+thread, restores cooked mode and returns without joining (A), in the other
+order (B), or with a join (J). Layout M: the program's task is the console
+owner; E: as hx, main creates a 16 MiB editor thread that owns the console and
+creates the input thread, joins it and ends with exit(). Every call is checked
+(status 5 when one failed after setup); each thread prints its role and task.
+Found (2026-11-04, nightly 20261031, Limpet 0.9.0): layout M, 51 runs in one
+Shell, all clean (before the checks were added). Layout E was not run: pkttrap
+found the cause first, and it is not in the console path (see pkttrap).
+
+## pkttrap
+
+Question: which message does a task find on its process port when dos.library
+raises "unexpected DOS packet received" (0x07000004), and who put it there?
+Diagnostic only, for a disposable test machine: it patches exec with
+SetFunction and stays resident until reset. `Run >NIL: pkttrap LOG NAME...`
+watches tasks named `pthread thread #...` and Shell processes running NAME. It
+records message traffic, list calls on their process ports, and opens and
+closes of stdc/stdcio/posixc in a ring. It checks those ports' lists on every
+patched call, and sets an x86 write watchpoint (DR0/DR7 through Supervisor,
+kernel.resource handler for vector 1) on `ln_Succ` of the message last added
+to such a port. The ring is written to LOG at the alert (then frozen) and on
+CTRL-E; callers are decoded with debug.library. `pkttrap TEST` checks the
+watchpoint. Build: `x86_64-aros-gcc --sysroot=SDK -O2 -o pkttrap pkttrap.c`.
+Found (2026-11-04, nightly 20261031, Helix preview 2 candidate 5): the alert
+is a use-after-free in the C runtime, not a stray packet. The editor thread's
+own stdcio base, opened by its posixc base, caches its NIL: handles. A
+`getpwuid_r()` from `std::env::home_dir` in that thread opens usergroup.library,
+which holds a second reference to that posixc base. hx main closes usergroup
+at exit, after the editor thread has freed those handles, and stdcio's
+`__close_stdio` writes `fh_Flags` into them. That memory was the thread's last
+UnLock packet; the write turned its `ln_Succ` into the port's list header.
+Details: AROS-dev docs/platform/v1-posixc-worker-base-stdcio-uaf-20261104.md.
