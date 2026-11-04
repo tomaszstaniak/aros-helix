@@ -76,8 +76,9 @@ For ABIv1 `build` also needs `gcc_build`, the host build directory of the GCC
 that made the toolchain (`<AROS build>/bin/<host>`), when that toolchain's
 libgcc never fills its DWARF register size table (AROS GCC patches before
 52bab89955, 2026-09-13): every panic would abort. `build` then compiles
-libgcc's `unwind-dw2.c` from that tree twice, unchanged (it must match the
-toolchain's object) and without the guard, and links the fixed object ahead
+libgcc's `unwind-dw2.c` from that tree twice, unchanged (its disassembly and
+relocations, `objdump -d -r`, must match the toolchain's object; the bytes are
+not compared) and without the guard, and links the fixed object ahead
 of libgcc. `build.json` records it as `unwinder`.
 
 Before compiling, `build` checks libc-aros against the SDK (the ABI layout

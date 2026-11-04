@@ -285,8 +285,8 @@ def build_unwind_fix(cfg, root):
     the first unwind (a Rust panic, a C++ throw, _Unwind_Backtrace) aborts in
     uw_init_context. Returns None when the toolchain's own object already has the table.
     Otherwise compiles the GCC build tree's unwind-dw2.c twice with the libgcc recipe:
-    unchanged, which must disassemble like the toolchain's object, and without the
-    guard, which is the object linked ahead of libgcc. Same fix as aros-svg-icons
+    unchanged, whose disassembly and relocations (not its bytes) must match the
+    toolchain's object, and without the guard, which is the object linked ahead of libgcc. Same fix as aros-svg-icons
     scripts/build-unwind-fix-v1.sh."""
     gcc, ar = cfg["aros_gcc"], cfg["aros_ar"]
     nm, objdump = gcc.replace("-gcc", "-nm"), gcc.replace("-gcc", "-objdump")
