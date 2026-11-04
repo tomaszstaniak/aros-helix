@@ -1,0 +1,114 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 16:26:26 +0100
+Subject: [PATCH 4/4] EXPERIMENT: AROS LSP build starts language servers only
+
+Problem: the process bridge lets every caller start programs, and its
+kill-on-drop guard refuses language servers, which Helix always starts
+with kill_on_drop. An LSP build must not also enable formatters, :sh,
+:pipe and debug adapters, whose children cannot be stopped on AROS.
+Change: with --cfg aros_lsp_cooperative, helix_stdx::process starts only
+commands marked with language_server(), which helix-lsp sets; the
+kill-on-drop guard applies only without that cfg. Dropping a server that
+has not exited waits for it (posixc kill returns ENOSYS).
+Platform scope: target_os = "aros"; experimental build only.
+Upstream status: local-only (not submitted).
+---
+ helix-lsp/src/client.rs   |  9 ++++++---
+ helix-stdx/Cargo.toml     |  4 ++++
+ helix-stdx/src/process.rs | 19 ++++++++++++++++---
+ 3 files changed, 26 insertions(+), 6 deletions(-)
+
+diff --git a/helix-lsp/src/client.rs b/helix-lsp/src/client.rs
+index 6f301fcbd6578b89cf823ee1fa0c9b27658ec644..406a698aa7abca23ad5afe076a267f667f8a7381 100644
+--- a/helix-lsp/src/client.rs
++++ b/helix-lsp/src/client.rs
+@@ -222,7 +222,8 @@ pub fn start(
+         // Resolve path to the binary
+         let cmd = helix_stdx::env::which(cmd)?;
+ 
+-        let process = Command::new(cmd)
++        let mut command = Command::new(cmd);
++        command
+             .envs(server_environment)
+             .args(args)
+             .stdin(Stdio::piped())
+@@ -230,8 +231,10 @@ pub fn start(
+             .stderr(Stdio::piped())
+             .current_dir(&root_path)
+             // make sure the process is reaped on drop
+-            .kill_on_drop(true)
+-            .spawn();
++            .kill_on_drop(true);
++        #[cfg(target_os = "aros")]
++        command.language_server();
++        let process = command.spawn();
+ 
+         let mut process = process?;
+ 
+diff --git a/helix-stdx/Cargo.toml b/helix-stdx/Cargo.toml
+index d2d5b4443b19da870bae27bac66640e148290366..a7d6737383b5d773f801936cd701e376ee88867c 100644
+--- a/helix-stdx/Cargo.toml
++++ b/helix-stdx/Cargo.toml
+@@ -38,3 +38,7 @@ libc = "0.2"
+ 
+ [dev-dependencies]
+ tempfile.workspace = true
++
++[lints.rust]
++# Set by the experimental AROS LSP build (scripts/hx.py build --lsp-experimental).
++unexpected_cfgs = { level = "warn", check-cfg = ["cfg(aros_lsp_cooperative)"] }
+diff --git a/helix-stdx/src/process.rs b/helix-stdx/src/process.rs
+index 25fdceaeee326dfc3d4204d74551ab2868dbaae6..4c86ae3d0427d9051053474fc69e7b523d39b1f4 100644
+--- a/helix-stdx/src/process.rs
++++ b/helix-stdx/src/process.rs
+@@ -14,10 +14,11 @@
+ pub struct Command {
+     inner: std::process::Command,
+     kill_on_drop: bool,
++    language_server: bool,
+ }
+ impl Command {
+     pub fn new<S: AsRef<OsStr>>(program: S) -> Self {
+-        Self { inner: std::process::Command::new(program), kill_on_drop: false }
++        Self { inner: std::process::Command::new(program), kill_on_drop: false, language_server: false }
+     }
+     pub fn arg<S: AsRef<OsStr>>(&mut self, arg: S) -> &mut Self { self.inner.arg(arg); self }
+     pub fn args<I, S>(&mut self, args: I) -> &mut Self
+@@ -34,14 +35,26 @@ pub fn envs<I, K, V>(&mut self, vars: I) -> &mut Self
+     pub fn stdout<T: Into<Stdio>>(&mut self, cfg: T) -> &mut Self { self.inner.stdout(cfg); self }
+     pub fn stderr<T: Into<Stdio>>(&mut self, cfg: T) -> &mut Self { self.inner.stderr(cfg); self }
+     pub fn kill_on_drop(&mut self, enabled: bool) -> &mut Self { self.kill_on_drop = enabled; self }
++    /// Marks the command as a language server. With `--cfg aros_lsp_cooperative`
++    /// only such commands start on AROS; formatters, `:sh`, `:pipe` and debug
++    /// adapters keep reporting `Unsupported`.
++    pub fn language_server(&mut self) -> &mut Self { self.language_server = true; self }
+     pub fn spawn(&mut self) -> io::Result<Child> {
+         // Fail before creating an unmanageable persistent server. This is a
+         // profile qualification guard, not detection of capability by CPU.
+-        #[cfg(target_os = "aros")]
++        #[cfg(all(target_os = "aros", not(aros_lsp_cooperative)))]
+         if self.kill_on_drop {
+             return Err(io::Error::new(io::ErrorKind::Unsupported,
+                 "AROS kill-on-drop is unqualified: posixc kill returns ENOSYS"));
+         }
++        // The experimental LSP build starts language servers only. A server
++        // cannot be killed on AROS (posixc kill returns ENOSYS): dropping one
++        // that has not exited only waits for it.
++        #[cfg(all(target_os = "aros", aros_lsp_cooperative))]
++        if !self.language_server {
++            return Err(io::Error::new(io::ErrorKind::Unsupported,
++                "this experimental AROS build starts language servers only"));
++        }
+         let mut inner = self.inner.spawn()?;
+         Ok(Child {
+             stdin: inner.stdin.take().map(|p| ChildStdin(Some(pipe_file(p)))),
+@@ -57,7 +70,7 @@ pub async fn output(&mut self) -> io::Result<Output> {
+     }
+ }
+ impl From<std::process::Command> for Command {
+-    fn from(inner: std::process::Command) -> Self { Self { inner, kill_on_drop: false } }
++    fn from(inner: std::process::Command) -> Self { Self { inner, kill_on_drop: false, language_server: false } }
+ }
+ 
+ fn pipe_file<P: Into<std::os::fd::OwnedFd>>(pipe: P) -> File {

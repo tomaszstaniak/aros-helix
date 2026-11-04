@@ -1,0 +1,351 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Sun, 1 Nov 2026 02:16:26 +0100
+Subject: [PATCH 1/4] EXPERIMENT: enable finite formatter stdio qualification
+
+---
+ helix-stdx/Cargo.toml     |   2 +-
+ helix-stdx/src/process.rs | 285 ++++++++++++++++++--------------------
+ 2 files changed, 133 insertions(+), 154 deletions(-)
+
+diff --git a/helix-stdx/Cargo.toml b/helix-stdx/Cargo.toml
+index 9672c5a31dd0babe9536e59a9cb465cdd716c552..d2d5b4443b19da870bae27bac66640e148290366 100644
+--- a/helix-stdx/Cargo.toml
++++ b/helix-stdx/Cargo.toml
+@@ -31,7 +31,7 @@ rustix = { version = "1.0", features = ["fs"] }
+ 
+ # AROS: async child processes for the code that uses tokio::process elsewhere.
+ [target.'cfg(target_os = "aros")'.dependencies]
+-tokio = { version = "1", features = ["io-util"] }
++tokio = { version = "1", features = ["io-util", "fs", "time", "macros"] }
+ # The custom getrandom backend for AROS (src/aros_random.rs).
+ getrandom = { version = "0.3", default-features = false }
+ libc = "0.2"
+diff --git a/helix-stdx/src/process.rs b/helix-stdx/src/process.rs
+index d25be832319b5ec04c2ab13611a6d7bc89821327..25fdceaeee326dfc3d4204d74551ab2868dbaae6 100644
+--- a/helix-stdx/src/process.rs
++++ b/helix-stdx/src/process.rs
+@@ -1,191 +1,170 @@
+-//! Async child processes on AROS.
++//! Async child I/O without a mio process backend.
+ //!
+-//! Tokio's `process` module needs mio, which has no AROS backend. This module
+-//! offers the part of its API that Helix uses, so language servers, debug
+-//! adapters, formatters, `:sh`, `:pipe` and URL openers compile unchanged;
+-//! starting a program reports `Unsupported` until a thread-backed
+-//! implementation replaces it. A child can therefore never exist, and the
+-//! types that would belong to one are uninhabited.
+-use std::{
+-    ffi::OsStr,
+-    fmt, io,
+-    path::Path,
+-    pin::Pin,
+-    process::{ExitStatus, Output, Stdio},
+-    task::{Context, Poll},
+-};
++//! File I/O uses Tokio's bounded blocking workers. Both output streams are
++//! drained concurrently; child status polling never holds a lock across wait.
++//! AROS still needs a real process termination contract before kill-on-drop
++//! can be offered. In particular a DOS break signal is not POSIX SIGKILL.
++use std::{ffi::OsStr, fmt, io, path::Path, pin::Pin,
++    process::{ExitStatus, Output, Stdio}, task::{Context, Poll}};
++use tokio::{fs::File, io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf}};
+ 
+-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
++const OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
+ 
+-fn unsupported() -> io::Error {
+-    io::Error::new(
+-        io::ErrorKind::Unsupported,
+-        "starting programs from Helix is not supported on AROS yet",
+-    )
+-}
+-
+-#[derive(Clone, Copy)]
+-enum Never {}
+-
+-/// The subset of `tokio::process::Command` that Helix uses.
+ #[derive(Debug)]
+ pub struct Command {
+     inner: std::process::Command,
++    kill_on_drop: bool,
+ }
+-
+ impl Command {
+-    pub fn new<S: AsRef<OsStr>>(program: S) -> Command {
+-        Command {
+-            inner: std::process::Command::new(program),
+-        }
+-    }
+-
+-    pub fn arg<S: AsRef<OsStr>>(&mut self, arg: S) -> &mut Command {
+-        self.inner.arg(arg);
+-        self
+-    }
+-
+-    pub fn args<I, S>(&mut self, args: I) -> &mut Command
+-    where
+-        I: IntoIterator<Item = S>,
+-        S: AsRef<OsStr>,
+-    {
+-        self.inner.args(args);
+-        self
+-    }
+-
+-    pub fn env<K: AsRef<OsStr>, V: AsRef<OsStr>>(&mut self, key: K, value: V) -> &mut Command {
+-        self.inner.env(key, value);
+-        self
+-    }
+-
+-    pub fn envs<I, K, V>(&mut self, vars: I) -> &mut Command
+-    where
+-        I: IntoIterator<Item = (K, V)>,
+-        K: AsRef<OsStr>,
+-        V: AsRef<OsStr>,
+-    {
+-        self.inner.envs(vars);
+-        self
+-    }
+-
+-    pub fn current_dir<P: AsRef<Path>>(&mut self, dir: P) -> &mut Command {
+-        self.inner.current_dir(dir);
+-        self
+-    }
+-
+-    pub fn stdin<T: Into<Stdio>>(&mut self, cfg: T) -> &mut Command {
+-        self.inner.stdin(cfg);
+-        self
+-    }
+-
+-    pub fn stdout<T: Into<Stdio>>(&mut self, cfg: T) -> &mut Command {
+-        self.inner.stdout(cfg);
+-        self
+-    }
+-
+-    pub fn stderr<T: Into<Stdio>>(&mut self, cfg: T) -> &mut Command {
+-        self.inner.stderr(cfg);
+-        self
+-    }
+-
+-    pub fn kill_on_drop(&mut self, _kill_on_drop: bool) -> &mut Command {
+-        self
+-    }
+-
++    pub fn new<S: AsRef<OsStr>>(program: S) -> Self {
++        Self { inner: std::process::Command::new(program), kill_on_drop: false }
++    }
++    pub fn arg<S: AsRef<OsStr>>(&mut self, arg: S) -> &mut Self { self.inner.arg(arg); self }
++    pub fn args<I, S>(&mut self, args: I) -> &mut Self
++    where I: IntoIterator<Item=S>, S: AsRef<OsStr> { self.inner.args(args); self }
++    pub fn env<K: AsRef<OsStr>, V: AsRef<OsStr>>(&mut self, key: K, value: V) -> &mut Self {
++        self.inner.env(key, value); self
++    }
++    pub fn envs<I, K, V>(&mut self, vars: I) -> &mut Self
++    where I: IntoIterator<Item=(K,V)>, K: AsRef<OsStr>, V: AsRef<OsStr> {
++        self.inner.envs(vars); self
++    }
++    pub fn current_dir<P: AsRef<Path>>(&mut self, dir: P) -> &mut Self { self.inner.current_dir(dir); self }
++    pub fn stdin<T: Into<Stdio>>(&mut self, cfg: T) -> &mut Self { self.inner.stdin(cfg); self }
++    pub fn stdout<T: Into<Stdio>>(&mut self, cfg: T) -> &mut Self { self.inner.stdout(cfg); self }
++    pub fn stderr<T: Into<Stdio>>(&mut self, cfg: T) -> &mut Self { self.inner.stderr(cfg); self }
++    pub fn kill_on_drop(&mut self, enabled: bool) -> &mut Self { self.kill_on_drop = enabled; self }
+     pub fn spawn(&mut self) -> io::Result<Child> {
+-        Err(unsupported())
++        // Fail before creating an unmanageable persistent server. This is a
++        // profile qualification guard, not detection of capability by CPU.
++        #[cfg(target_os = "aros")]
++        if self.kill_on_drop {
++            return Err(io::Error::new(io::ErrorKind::Unsupported,
++                "AROS kill-on-drop is unqualified: posixc kill returns ENOSYS"));
++        }
++        let mut inner = self.inner.spawn()?;
++        Ok(Child {
++            stdin: inner.stdin.take().map(|p| ChildStdin(Some(pipe_file(p)))),
++            stdout: inner.stdout.take().map(|p| ChildStdout(pipe_file(p))),
++            stderr: inner.stderr.take().map(|p| ChildStderr(pipe_file(p))),
++            inner: Some(inner), kill_on_drop: self.kill_on_drop,
++        })
+     }
+-
+     pub async fn output(&mut self) -> io::Result<Output> {
+-        Err(unsupported())
++        // Match Tokio output(): capture outputs without overriding configured stdin.
++        self.stdout(Stdio::piped()).stderr(Stdio::piped());
++        self.spawn()?.wait_with_output().await
+     }
+ }
+-
+ impl From<std::process::Command> for Command {
+-    fn from(inner: std::process::Command) -> Command {
+-        Command { inner }
+-    }
++    fn from(inner: std::process::Command) -> Self { Self { inner, kill_on_drop: false } }
++}
++
++fn pipe_file<P: Into<std::os::fd::OwnedFd>>(pipe: P) -> File {
++    let mut file = File::from_std(std::fs::File::from(pipe.into()));
++    // The selected AROS DOS pipe waits to satisfy the requested read length.
++    // Match rust-aros transport's explicit DosPipe policy; do not prefetch an
++    // 8 KiB header while an LSP peer is waiting for a response.
++    if cfg!(target_os = "aros") { file.set_max_buf_size(1); }
++    file
+ }
+ 
+-/// A running child process. None can be started on AROS yet.
++#[derive(Debug)]
+ pub struct Child {
+     pub stdin: Option<ChildStdin>,
+     pub stdout: Option<ChildStdout>,
+     pub stderr: Option<ChildStderr>,
+-    never: Never,
+-}
+-
+-impl fmt::Debug for Child {
+-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
+-        match self.never {}
+-    }
++    inner: Option<std::process::Child>,
++    kill_on_drop: bool,
+ }
+-
+ impl Child {
+-    pub fn id(&self) -> Option<u32> {
+-        match self.never {}
+-    }
+-
++    pub fn id(&self) -> Option<u32> { self.inner.as_ref().map(std::process::Child::id) }
+     pub fn start_kill(&mut self) -> io::Result<()> {
+-        match self.never {}
++        if self.inner.as_mut().unwrap().try_wait()?.is_some() { return Ok(()); }
++        self.inner.as_mut().unwrap().kill()
+     }
+-
+-    pub async fn kill(&mut self) -> io::Result<()> {
+-        match self.never {}
+-    }
+-
+-    pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+-        match self.never {}
+-    }
+-
++    pub async fn kill(&mut self) -> io::Result<()> { self.start_kill()?; self.wait().await?; Ok(()) }
++    pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> { self.inner.as_mut().unwrap().try_wait() }
+     pub async fn wait(&mut self) -> io::Result<ExitStatus> {
+-        match self.never {}
++        // Like Tokio, close only stdin that the caller has not taken.
++        self.stdin.take();
++        loop {
++            if let Some(status) = self.inner.as_mut().unwrap().try_wait()? { return Ok(status); }
++            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
++        }
+     }
+-
+-    pub async fn wait_with_output(self) -> io::Result<Output> {
+-        match self.never {}
++    pub async fn wait_with_output(mut self) -> io::Result<Output> {
++        self.stdin.take();
++        let stdout = self.stdout.take();
++        let stderr = self.stderr.take();
++        let (status, stdout, stderr) = tokio::join!(self.wait(), drain(stdout), drain(stderr));
++        Ok(Output { status: status?, stdout: stdout?, stderr: stderr? })
+     }
+ }
+-
+-macro_rules! pipe_end {
+-    ($name:ident) => {
+-        pub struct $name(Never);
+-
+-        impl fmt::Debug for $name {
+-            fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
+-                match self.0 {}
+-            }
++impl Drop for Child {
++    fn drop(&mut self) {
++        let Some(mut inner) = self.inner.take() else { return; };
++        if inner.try_wait().ok().flatten().is_some() { return; }
++        if self.kill_on_drop { let _ = inner.kill(); }
++        // A dropped std Child does not reap. Keep it owned until wait returns,
++        // without blocking the UI. AROS persistent children are refused above;
++        // this path cannot turn ENOSYS into a successful termination.
++        if let Ok(handle) = tokio::runtime::Handle::try_current() {
++            handle.spawn_blocking(move || { let _ = inner.wait(); });
++        } else {
++            std::thread::spawn(move || { let _ = inner.wait(); });
+         }
+-    };
++    }
+ }
+ 
+-pipe_end!(ChildStdin);
+-pipe_end!(ChildStdout);
+-pipe_end!(ChildStderr);
++async fn drain<R: AsyncRead + Unpin>(reader: Option<R>) -> io::Result<Vec<u8>> {
++    let Some(mut reader) = reader else { return Ok(Vec::new()); };
++    let mut data = Vec::new();
++    let mut overflow = false;
++    let mut buf = [0; 8192];
++    loop {
++        let n = reader.read(&mut buf).await?;
++        if n == 0 { break; }
++        if data.len() <= OUTPUT_LIMIT.saturating_sub(n) && !overflow { data.extend_from_slice(&buf[..n]); }
++        else { overflow = true; }
++        // Keep draining after the limit: otherwise a finite producer blocks
++        // forever on its full stdout while we wait for its exit.
++    }
++    if overflow { Err(io::Error::new(io::ErrorKind::InvalidData, "child output exceeded 8 MiB per stream")) }
++    else { Ok(data) }
++}
+ 
++pub struct ChildStdin(Option<File>);
++pub struct ChildStdout(File);
++pub struct ChildStderr(File);
++macro_rules! debug_pipe { ($t:ident) => {
++    impl fmt::Debug for $t {
++        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str(stringify!($t)) }
++    }
++}; }
++debug_pipe!(ChildStdin); debug_pipe!(ChildStdout); debug_pipe!(ChildStderr);
+ impl AsyncWrite for ChildStdin {
+-    fn poll_write(self: Pin<&mut Self>, _: &mut Context<'_>, _: &[u8]) -> Poll<io::Result<usize>> {
+-        match self.0 {}
++    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
++        match self.0.as_mut() {
++            Some(file) => Pin::new(file).poll_write(cx, buf),
++            None => Poll::Ready(Err(io::ErrorKind::BrokenPipe.into())),
++        }
+     }
+-
+-    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+-        match self.0 {}
++    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
++        match self.0.as_mut() { Some(file) => Pin::new(file).poll_flush(cx), None => Poll::Ready(Ok(())) }
+     }
+-
+-    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+-        match self.0 {}
+-    }
+-}
+-
+-impl AsyncRead for ChildStdout {
+-    fn poll_read(self: Pin<&mut Self>, _: &mut Context<'_>, _: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+-        match self.0 {}
++    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
++        match self.as_mut().poll_flush(cx) {
++            Poll::Ready(Ok(())) => { self.0.take(); Poll::Ready(Ok(())) }
++            other => other,
++        }
+     }
+ }
+-
+-impl AsyncRead for ChildStderr {
+-    fn poll_read(self: Pin<&mut Self>, _: &mut Context<'_>, _: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+-        match self.0 {}
++macro_rules! read_pipe { ($t:ident) => {
++    impl AsyncRead for $t {
++        fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
++            Pin::new(&mut self.0).poll_read(cx, buf)
++        }
+     }
+-}
++}; }
++read_pipe!(ChildStdout); read_pipe!(ChildStderr);

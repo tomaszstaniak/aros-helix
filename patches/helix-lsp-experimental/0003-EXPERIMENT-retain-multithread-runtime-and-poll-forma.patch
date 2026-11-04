@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Sun, 1 Nov 2026 02:47:13 +0100
+Subject: [PATCH 3/4] EXPERIMENT: retain multithread runtime and poll formatter
+ on main task
+
+---
+ helix-term/src/commands/typed.rs | 6 ++++++
+ helix-term/src/main.rs           | 3 +--
+ 2 files changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/helix-term/src/commands/typed.rs b/helix-term/src/commands/typed.rs
+index 82cad8386e9597fcddedc2ca5a39e55de915f57d..27e32d070111aa90302af25fc101dd296af7850d 100644
+--- a/helix-term/src/commands/typed.rs
++++ b/helix-term/src/commands/typed.rs
+@@ -540,6 +540,12 @@ fn format(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> anyh
+         "A formatter isn't available, and no language server provides formatting capabilities",
+     )?;
+     let callback = make_format_callback(doc.id(), doc.version(), view.id, format, None);
++    // EXPERIMENT ONLY: the legacy ABIv11 CRT initializes vfork context on
++    // the main task. Poll formatter work from the editor's main-task queue.
++    // Pending formatter shutdown is still unqualified for unbounded children.
++    #[cfg(target_os = "aros")]
++    cx.jobs.add(crate::job::Job::with_callback(callback).wait_before_exiting());
++    #[cfg(not(target_os = "aros"))]
+     cx.jobs.callback(callback);
+ 
+     Ok(())
+diff --git a/helix-term/src/main.rs b/helix-term/src/main.rs
+index b0b6400b97c62f653b89fd31c139a75a8bb166a1..13925271bab2b5ba21b055b57b76d02ea0c464b9 100644
+--- a/helix-term/src/main.rs
++++ b/helix-term/src/main.rs
+@@ -47,8 +47,7 @@ fn main() -> Result<()> {
+     std::process::exit(main_impl()?);
+ }
+ 
+-#[cfg_attr(target_os = "aros", tokio::main(flavor = "current_thread"))]
+-#[cfg_attr(not(target_os = "aros"), tokio::main)]
++#[tokio::main]
+ async fn main_impl() -> Result<i32> {
+     let args = Args::parse_args().context("could not parse arguments")?;
+ 

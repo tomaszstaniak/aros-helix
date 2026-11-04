@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Sun, 1 Nov 2026 02:31:18 +0100
+Subject: [PATCH 2/4] EXPERIMENT: qualify formatter on initialized CRT main
+ task
+
+---
+ helix-term/src/main.rs | 29 ++++++-----------------------
+ 1 file changed, 6 insertions(+), 23 deletions(-)
+
+diff --git a/helix-term/src/main.rs b/helix-term/src/main.rs
+index dc3de01878ae94bc9cbb8ed05eb535717d4408b6..b0b6400b97c62f653b89fd31c139a75a8bb166a1 100644
+--- a/helix-term/src/main.rs
++++ b/helix-term/src/main.rs
+@@ -39,33 +39,16 @@ fn main() -> Result<()> {
+     std::process::exit(exit_code);
+ }
+ 
+-/// The editor's own stack on AROS. A Shell gives its commands 40 KB by
+-/// default on AROS One, far too little for the editor's async state, and
+-/// the process stack cannot grow; the editor runs on a thread of its own.
+-#[cfg(target_os = "aros")]
+-const EDITOR_STACK: usize = 16 * 1024 * 1024;
+-
++// EXPERIMENT ONLY: launch with Shell Stack 16777216. Old ABIv11 CRT
++// lacks the program context needed by vfork in pthread workers. Keep process
++// futures on the initialized main task; this does not qualify cancellation.
+ #[cfg(target_os = "aros")]
+ fn main() -> Result<()> {
+-    let editor = std::thread::Builder::new()
+-        .name("helix".into())
+-        .stack_size(EDITOR_STACK)
+-        .spawn(main_impl)
+-        .context("could not start the editor thread")?;
+-    // The runtime has shut down when main_impl returns, so its threads have
+-    // ended before the process does. A panic has already been reported and
+-    // the terminal restored by the panic hook; end with Rust's panic status
+-    // from here, since abort() from another task is not a clean exit on AROS.
+-    let exit_code = match editor.join() {
+-        Ok(result) => result?,
+-        Err(_) => 101,
+-    };
+-    std::process::exit(exit_code);
++    std::process::exit(main_impl()?);
+ }
+ 
+-// Returns the exit code instead of exiting: on AROS this runs on a thread of
+-// its own, and only the main task may end the process.
+-#[tokio::main]
++#[cfg_attr(target_os = "aros", tokio::main(flavor = "current_thread"))]
++#[cfg_attr(not(target_os = "aros"), tokio::main)]
+ async fn main_impl() -> Result<i32> {
+     let args = Args::parse_args().context("could not parse arguments")?;
+ 
