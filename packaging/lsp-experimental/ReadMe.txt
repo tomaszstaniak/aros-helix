@@ -36,8 +36,10 @@ In a Limpet window:
 
 hx-lsp sets a 16 MB stack for the Shell (this build runs the editor on the
 Shell's own task) and starts SYS:Helix-LSP/hx. The example has a mistake
-on line 4, "local.get $c": after a moment Helix marks it and shows the
-server's message. Change $c to $b and the mark goes away. Also try:
+on line 4, "local.get $c". Wait a moment and press Esc: Helix marks the
+line and shows the server's message (see Limitations for why the key
+press is needed). Change $c to $b, press Esc, and the mark goes away.
+Also try:
 
     space k       show what the server knows about the name under the cursor
     space s       the symbols of the file
@@ -57,11 +59,21 @@ Limitations
 - Experimental. Only language servers can be started. Formatters, :sh,
   :pipe and debug adapters still report that this build starts language
   servers only.
+- Messages the server sends by itself, such as diagnostics, are drawn
+  only at your next key press or mouse click: after opening or changing a
+  file, press a key (Esc does nothing else) to see them. Answers to your
+  own requests (space k, space s, :format) appear at once.
+- If the language server cannot be started, for example because the path
+  in languages.toml is wrong, the file opens without diagnostics and Helix
+  shows no message.
 - A language server cannot be stopped from outside on AROS. When you quit,
   Helix asks the server to shut down and waits until it has ended. A server
   that does not end (one that hangs or ignores the request) keeps Helix
   from returning to the Shell until it ends by itself, and it stays in the
-  system until then. Closing the Limpet window does not end it either.
+  system until then; the screen does not change while Helix waits. In a
+  test, a server that ignored the request kept Helix waiting until it
+  ended 20 seconds later. Closing the Limpet window does not end it
+  either.
 - The other limitations of the Helix preview apply: no system clipboard,
   syntax highlighting for Rust only (.wat files are shown without colours),
   slower screen updates.
