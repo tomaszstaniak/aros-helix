@@ -1,0 +1,11 @@
+[package]
+name = "home-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "home-probe"
+path = "src/main.rs"
+
+[workspace]

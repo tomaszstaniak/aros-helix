@@ -178,3 +178,15 @@ at exit, after the editor thread has freed those handles, and stdcio's
 `__close_stdio` writes `fh_Flags` into them. That memory was the thread's last
 UnLock packet; the write turned its `ln_Succ` into the port's list header.
 Details: AROS-dev docs/platform/v1-posixc-worker-base-stdcio-uaf-20261104.md.
+
+## home-probe
+
+Question: what does `std::env::home_dir()` return on AROS, from the program's
+task and from a pthread worker, with `HOME` unset, empty or set? Run: `python3
+scripts/hx.py build --target <target> --probe home-probe`, then `home-probe`
+in a Shell. Found (2026-11-04, v1 nightly 20261031, toolchain
+aros-v1-x86-20261104 with rust-aros 321495a's std change): unset and empty
+`HOME` (local or global) give `None` in both, `HOME=RAM:home` gives
+`Some("RAM:home")`; `HOME` is not set on that nightly by default. The binary
+no longer calls posixc's `getpwuid_r`, whose `usergroup.library` open from a
+worker led to the v1 dos alert (see pkttrap).
