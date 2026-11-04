@@ -642,6 +642,10 @@ def cmd_build(args):
         pre_link.append(str(unwind_fix))
     if pre_link:
         flags.append("-Zpre-link-args=" + " ".join(pre_link))
+    if args.lsp_experimental:
+        # Experimental LSP variant: language servers start, nothing else does
+        # (helix-stdx/src/process.rs on the experimental branch).
+        flags += ["--cfg", "aros_lsp_cooperative"]
     if args.probe_flag:
         if not args.probe:
             raise Failure("--probe-flag applies to --probe builds only")
@@ -718,6 +722,7 @@ def cmd_build(args):
               "pthread": pthread.name if pthread else "SDK libpthread.a",
               "unwinder": sha256_file(unwind_fix) if unwind_fix else "toolchain libgcc", "grammars": sha256_file(grammars),
               "target_json": sha256_file(target_json), "sdk_layout": sdk_layout,
+              "variant": "lsp-experimental" if args.lsp_experimental else "default",
               "binary": str(binary), "sha256": sha256_file(binary), "size": binary.stat().st_size}
     (root / "build.json").write_text(json.dumps(record, indent=2) + "\n")
     print(json.dumps(record, indent=2))
@@ -750,14 +755,21 @@ def cmd_package(args):
         raise Failure("work/helix moved since the build; build again")
     if record.get("sdk_layout", "skipped") == "skipped":
         raise Failure("this build did not pass the ABI layout gate; it is for diagnosis only")
+    lsp = record.get("variant", "default") == "lsp-experimental"
+    if lsp != bool(args.lsp_experimental):
+        raise Failure(f"the last build is the {record.get('variant', 'default')} variant; "
+                      "--lsp-experimental must match it")
+    if lsp and not args.server:
+        raise Failure("--lsp-experimental needs --server (the language server build record, JSON)")
     dist = REPO / "dist" / "unreleased"
     variant = "-unstripped" if args.unstripped else ""
-    name = f"Helix-{PACKAGE_VERSION}-candidate{args.candidate}{variant}-{args.target}"
+    kind = "lsp-experimental" if lsp else "candidate"
+    name = f"Helix-{PACKAGE_VERSION}-{kind}{args.candidate}{variant}-{args.target}"
     archive = dist / f"{name}.zip"
     if archive.exists():
         raise Failure(f"{archive} exists; delivered archives are never replaced")
     with tempfile.TemporaryDirectory(prefix="hx-package-") as tmp:
-        top = Path(tmp) / "Helix"
+        top = Path(tmp) / ("Helix-LSP" if lsp else "Helix")
         (top / "runtime").mkdir(parents=True)
         if args.unstripped:
             # Diagnostic variant: the linked file itself, with its symbols.
@@ -773,7 +785,7 @@ def cmd_package(args):
             shutil.copytree(runtime / "queries" / name_, top / "runtime/queries" / name_)
         shutil.copytree(runtime / "themes", top / "runtime/themes")
         shutil.copyfile(runtime / "tutor", top / "runtime/tutor")
-        readme = (REPO / "packaging/ReadMe.txt").read_text()
+        readme = (REPO / ("packaging/lsp-experimental/ReadMe.txt" if lsp else "packaging/ReadMe.txt")).read_text()
         for word, value in README_FIELDS[args.target].items():
             readme = readme.replace(word, value)
         left = re.findall(r"@[A-Z_]+@", readme)
@@ -782,15 +794,36 @@ def cmd_package(args):
         (top / "ReadMe.txt").write_text(readme)
         shutil.copyfile(WORK / "helix" / "LICENSE", top / "LICENSE.txt")
         shutil.copyfile(root / "THIRD-PARTY.txt", top / "THIRD-PARTY.txt")
+        if lsp:
+            add_language_server(args.server, top)
         contents = sorted(p for p in top.rglob("*") if p.is_file())
         (Path(tmp) / "contents.sha256").write_text("".join(
             f"{sha256_file(p)}  {p.relative_to(tmp).as_posix()}\n" for p in contents))
         dist.mkdir(exist_ok=True)
-        run(["zip", "-qrX", archive, "Helix"], cwd=tmp)
+        run(["zip", "-qrX", archive, top.name], cwd=tmp)
         shutil.copyfile(Path(tmp) / "contents.sha256", dist / f"{name}.contents.sha256")
     with open(dist / f"SHA256SUMS-{PACKAGE_VERSION}", "a") as sums:
         sums.write(f"{sha256_file(archive)}  {archive.name}\n")
     print(archive)
+
+
+def add_language_server(record_path, top):
+    """Copies the experimental package's language server and its files into `top`.
+    The record (JSON) names: "binary" (an AROS executable) with its "sha256",
+    "license" (the server's licence text) and "third_party" (its dependency list);
+    packaging/lsp-experimental supplies the configuration, example and launcher."""
+    record = json.loads(Path(record_path).read_text())
+    binary = Path(record["binary"])
+    if sha256_file(binary) != record["sha256"]:
+        raise Failure(f"{binary} does not match the sha256 in {record_path}")
+    shutil.copyfile(binary, top / "wat-server")
+    (top / "wat-server").chmod(0o755)
+    shutil.copyfile(record["license"], top / "wat-server-LICENSE.txt")
+    shutil.copyfile(record["third_party"], top / "wat-server-THIRD-PARTY.txt")
+    extra = REPO / "packaging/lsp-experimental"
+    for name in ("languages.toml", "example.wat", "hx-lsp"):
+        shutil.copyfile(extra / name, top / name)
+    (top / "hx-lsp").chmod(0o755)
 
 
 # Scenarios a native acceptance must pass before a candidate is promoted (both targets).
@@ -935,7 +968,11 @@ def main():
             sp.add_argument("--target", choices=sorted(TARGETS), default=DEFAULT_TARGET)
         if name in ("package", "promote"):
             sp.add_argument("--candidate", type=int, required=True, help="candidate number")
+        if name in ("build", "package"):
+            sp.add_argument("--lsp-experimental", action="store_true",
+                            help="the experimental LSP variant (language servers only; never promoted)")
         if name == "package":
+            sp.add_argument("--server", help="language server build record (JSON) for --lsp-experimental")
             sp.add_argument("--unstripped", action="store_true",
                             help="pack the linked binary unstripped (diagnostic variant)")
         if name == "promote":

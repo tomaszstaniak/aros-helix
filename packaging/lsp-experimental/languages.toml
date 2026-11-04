@@ -1,0 +1,5 @@
+# Helix-LSP (experimental): WebAssembly text files (.wat) use wat_server.
+# Copy this file to ENVARC:helix/languages.toml (or add its lines to yours).
+# If Helix-LSP is not unpacked to SYS:, change the path below.
+[language-server.wasm-language-tools]
+command = "SYS:Helix-LSP/wat-server"

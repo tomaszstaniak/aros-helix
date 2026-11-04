@@ -1,0 +1,8 @@
+.KEY FILES/M
+.BRA {
+.KET }
+; Helix with the experimental language server support (Helix-LSP).
+; This build runs the editor on the Shell's own task, which needs a
+; 16 MB stack. Change SYS:Helix-LSP if it is unpacked elsewhere.
+Stack 16777216
+SYS:Helix-LSP/hx {FILES}
