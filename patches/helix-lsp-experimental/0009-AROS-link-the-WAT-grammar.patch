@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 19:01:08 +0100
+Subject: [PATCH 09/10] AROS: link the WAT grammar
+
+tree-sitter-wasm's wat grammar (the revision Helix 25.07.1's
+languages.toml names) is compiled into hx by the port's build, like the
+Rust grammar; get_language() now returns it for "wat".
+---
+ helix-loader/src/grammar.rs | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/helix-loader/src/grammar.rs b/helix-loader/src/grammar.rs
+index 7f91f3f92a60cc93b5c950c83cc445c14dc8b218..8fff3a86a94907d5445cf8f911d6ca3f48cb9527 100644
+--- a/helix-loader/src/grammar.rs
++++ b/helix-loader/src/grammar.rs
+@@ -72,9 +72,11 @@ pub fn get_language(name: &str) -> Result<Option<Grammar>> {
+     use std::{ffi::c_void, ptr::NonNull};
+     extern "C" {
+         fn tree_sitter_rust() -> NonNull<c_void>;
++        fn tree_sitter_wat() -> NonNull<c_void>;
+     }
+     let language = match name {
+         "rust" => unsafe { tree_sitter_rust() },
++        "wat" => unsafe { tree_sitter_wat() },
+         _ => return Ok(None),
+     };
+     Ok(Some(unsafe { Grammar::from_language(language) }?))

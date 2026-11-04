@@ -1,0 +1,132 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 19:00:57 +0100
+Subject: [PATCH 05/10] AROS: find language servers in the Helix drawer
+
+A bare command that is not on the path is also looked up in the drawer
+named by HELIX_PROGDIR, which the hx launcher sets to its own drawer.
+wat_server installed next to Helix then starts with Helix's default
+configuration, without a path in ENVARC:helix/languages.toml.
+
+names_a_path() tells a command given by its path from a name to search
+for; ExecutableNotFoundError::command() gives the command as configured.
+Host tests cover the fallback and the path test.
+---
+ helix-stdx/src/env.rs | 79 ++++++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 74 insertions(+), 5 deletions(-)
+
+diff --git a/helix-stdx/src/env.rs b/helix-stdx/src/env.rs
+index 6f9a091e4402554ceaff7151b7a0c0c632eeeb59..d1c315d97a2aead8c1b85ebe1ddda1cbd43eb0af 100644
+--- a/helix-stdx/src/env.rs
++++ b/helix-stdx/src/env.rs
+@@ -58,16 +58,47 @@ pub fn binary_exists<T: AsRef<OsStr>>(binary_name: T) -> bool {
+ }
+ 
+ /// Attempts to find a binary of the given name. See [which](https://linux.die.net/man/1/which).
++///
++/// AROS: a bare name that is not on the path is also looked up in the
++/// drawer named by `HELIX_PROGDIR`, which the `hx` launcher sets to its own
++/// drawer: language servers installed next to Helix are found without a
++/// path in the settings.
+ pub fn which<T: AsRef<OsStr>>(
+     binary_name: T,
+ ) -> Result<std::path::PathBuf, ExecutableNotFoundError> {
+-    let binary_name = binary_name.as_ref();
+-    which::which(binary_name).map_err(|err| ExecutableNotFoundError {
+-        command: binary_name.to_string_lossy().into_owned(),
+-        inner: err,
++    #[cfg(target_os = "aros")]
++    let fallback = std::env::var_os("HELIX_PROGDIR").map(std::path::PathBuf::from);
++    #[cfg(not(target_os = "aros"))]
++    let fallback: Option<std::path::PathBuf> = None;
++    which_with_fallback(binary_name.as_ref(), fallback.as_deref())
++}
++
++fn which_with_fallback(
++    binary_name: &OsStr,
++    fallback: Option<&Path>,
++) -> Result<std::path::PathBuf, ExecutableNotFoundError> {
++    which::which(binary_name).or_else(|err| {
++        if let Some(dir) = fallback.filter(|_| !names_a_path(binary_name)) {
++            if let Ok(found) = which::which(dir.join(binary_name)) {
++                return Ok(found);
++            }
++        }
++        Err(ExecutableNotFoundError {
++            command: binary_name.to_string_lossy().into_owned(),
++            inner: err,
++        })
+     })
+ }
+ 
++/// Whether a command names a file by its path (`/bin/x`, `./x`, and on
++/// AROS also `Work:x`) rather than by a name to search for.
++pub fn names_a_path<T: AsRef<OsStr>>(command: T) -> bool {
++    let command = command.as_ref().to_string_lossy();
++    command.contains(std::path::MAIN_SEPARATOR)
++        || command.contains('/')
++        || (cfg!(target_os = "aros") && command.contains(':'))
++}
++
+ fn find_brace_end(src: &[u8]) -> Option<usize> {
+     use regex_automata::meta::Regex;
+ 
+@@ -167,6 +198,13 @@ pub struct ExecutableNotFoundError {
+     inner: which::Error,
+ }
+ 
++impl ExecutableNotFoundError {
++    /// The command that was looked for, as given.
++    pub fn command(&self) -> &str {
++        &self.command
++    }
++}
++
+ impl std::fmt::Display for ExecutableNotFoundError {
+     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+         write!(f, "command '{}' not found: {}", self.command, self.inner)
+@@ -179,7 +217,10 @@ impl std::error::Error for ExecutableNotFoundError {}
+ mod tests {
+     use std::ffi::{OsStr, OsString};
+ 
+-    use super::{current_working_dir, expand_impl, set_current_working_dir};
++    use super::{
++        current_working_dir, expand_impl, names_a_path, set_current_working_dir,
++        which_with_fallback,
++    };
+ 
+     #[test]
+     fn current_dir_is_set() {
+@@ -223,4 +264,32 @@ fn test_env_expand() {
+         assert_env_expand!(env, "baz/${EMPTY-bar}/foo", "baz//foo");
+         assert_env_expand!(env, "baz/${EMPTY=bar}/foo", "baz//foo");
+     }
++
++    #[test]
++    #[cfg(unix)]
++    fn which_falls_back_to_the_given_drawer_for_bare_names() {
++        use std::os::unix::fs::PermissionsExt;
++        let dir = tempfile::tempdir().unwrap();
++        let server = dir.path().join("helix-test-server-xyz");
++        std::fs::write(&server, "#!/bin/sh\n").unwrap();
++        std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o755)).unwrap();
++
++        let found = which_with_fallback(OsStr::new("helix-test-server-xyz"), Some(dir.path()));
++        assert_eq!(found.unwrap(), server);
++        // Not on the path and no fallback: not found, as before.
++        assert!(which_with_fallback(OsStr::new("helix-test-server-xyz"), None).is_err());
++        // A command given by its path is not looked up in the fallback drawer.
++        let named = which_with_fallback(OsStr::new("./helix-test-server-xyz"), Some(dir.path()));
++        assert!(named.is_err());
++        // A missing name stays an error that names the command.
++        let missing = which_with_fallback(OsStr::new("helix-test-missing-xyz"), Some(dir.path()));
++        assert!(missing.unwrap_err().to_string().contains("helix-test-missing-xyz"));
++    }
++
++    #[test]
++    fn names_a_path_tells_paths_from_names() {
++        assert!(!names_a_path("wat_server"));
++        assert!(names_a_path("/usr/bin/wat_server"));
++        assert!(names_a_path("./wat_server"));
++    }
+ }

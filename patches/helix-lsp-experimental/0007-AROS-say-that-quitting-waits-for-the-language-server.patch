@@ -1,0 +1,156 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 19:01:08 +0100
+Subject: [PATCH 07/10] AROS: say that quitting waits for the language servers
+
+AROS cannot stop a program from outside, so quitting Helix waits until
+each language server has ended. Helix's own 3 s shutdown timeout only
+ends the protocol exchange; a dropped server that is still running is
+then waited for on Tokio's blocking pool, which the runtime waits for
+when hx ends. Nothing told the user why the prompt did not come back.
+
+- When language servers are running at quit, the terminal is given back
+  before they are asked to shut down, and hx prints "waiting for the
+  language servers to exit...". The editor cannot draw this itself: its
+  last view is already closed then.
+- If the shutdown requests timed out and a server has still not ended
+  when Helix is done, hx says how many it still waits for. helix_stdx::process counts dropped children whose
+  wait has not returned (children_still_running).
+
+No time limit is claimed: hx returns when the servers have ended.
+---
+ helix-stdx/src/process.rs     | 19 +++++++++++++++++--
+ helix-term/src/application.rs | 28 +++++++++++++++++++++++++++-
+ helix-term/src/main.rs        | 19 +++++++++++++++++++
+ 3 files changed, 63 insertions(+), 3 deletions(-)
+
+diff --git a/helix-stdx/src/process.rs b/helix-stdx/src/process.rs
+index 4c86ae3d0427d9051053474fc69e7b523d39b1f4..075b105e019b244b72606da5eebb2eccfbc2006d 100644
+--- a/helix-stdx/src/process.rs
++++ b/helix-stdx/src/process.rs
+@@ -10,6 +10,16 @@
+ 
+ const OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
+ 
++/// Children that were dropped while still running and are being waited for.
++static STILL_RUNNING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
++
++/// How many dropped children have not ended yet. The program does not end
++/// before they do: the waits run on Tokio's blocking pool, which the
++/// runtime waits for when it shuts down.
++pub fn children_still_running() -> usize {
++    STILL_RUNNING.load(std::sync::atomic::Ordering::SeqCst)
++}
++
+ #[derive(Debug)]
+ pub struct Command {
+     inner: std::process::Command,
+@@ -122,10 +132,15 @@ fn drop(&mut self) {
+         // A dropped std Child does not reap. Keep it owned until wait returns,
+         // without blocking the UI. AROS persistent children are refused above;
+         // this path cannot turn ENOSYS into a successful termination.
++        STILL_RUNNING.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
++        let wait = move || {
++            let _ = inner.wait();
++            STILL_RUNNING.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
++        };
+         if let Ok(handle) = tokio::runtime::Handle::try_current() {
+-            handle.spawn_blocking(move || { let _ = inner.wait(); });
++            handle.spawn_blocking(wait);
+         } else {
+-            std::thread::spawn(move || { let _ = inner.wait(); });
++            std::thread::spawn(wait);
+         }
+     }
+ }
+diff --git a/helix-term/src/application.rs b/helix-term/src/application.rs
+index b3b469b83e18bbccdcba642140331c3369e86eef..ceeb162a449402f04e933600b3b3d4bc1ff90222 100644
+--- a/helix-term/src/application.rs
++++ b/helix-term/src/application.rs
+@@ -70,6 +70,10 @@ pub struct Application {
+     signals: Signals,
+     jobs: Jobs,
+     lsp_progress: LspProgressMap,
++    /// AROS: language servers did not finish their shutdown in time at quit;
++    /// hx then still waits for them to end.
++    #[cfg(target_os = "aros")]
++    pub language_servers_timed_out: bool,
+ }
+ 
+ #[cfg(feature = "integration")]
+@@ -248,6 +252,8 @@ pub fn new(args: Args, config: Config, lang_loader: syntax::Loader) -> Result<Se
+             signals,
+             jobs: Jobs::new(),
+             lsp_progress: LspProgressMap::new(),
++            #[cfg(target_os = "aros")]
++            language_servers_timed_out: false,
+         };
+ 
+         Ok(app)
+@@ -1161,9 +1167,25 @@ pub async fn run<S>(&mut self, input_stream: &mut S) -> Result<i32, Error>
+ 
+         self.event_loop(input_stream).await;
+ 
++        // AROS cannot stop a program from outside: quitting waits for each
++        // language server to end. The editor's views are closed by now, so
++        // give the terminal back first and say why the prompt may be late.
++        #[cfg(target_os = "aros")]
++        let restored = if self.editor.language_servers.iter_clients().next().is_some() {
++            self.restore_term()?;
++            eprintln!("hx: waiting for the language servers to exit...");
++            true
++        } else {
++            false
++        };
++        #[cfg(not(target_os = "aros"))]
++        let restored = false;
++
+         let close_errs = self.close().await;
+ 
+-        self.restore_term()?;
++        if !restored {
++            self.restore_term()?;
++        }
+ 
+         for err in close_errs {
+             self.editor.exit_code = 1;
+@@ -1194,6 +1216,10 @@ pub async fn close(&mut self) -> Vec<anyhow::Error> {
+         }
+ 
+         if self.editor.close_language_servers(None).await.is_err() {
++            #[cfg(target_os = "aros")]
++            {
++                self.language_servers_timed_out = true;
++            }
+             log::error!("Timed out waiting for language servers to shutdown");
+             errs.push(anyhow::format_err!(
+                 "Timed out waiting for language servers to shutdown"
+diff --git a/helix-term/src/main.rs b/helix-term/src/main.rs
+index 13925271bab2b5ba21b055b57b76d02ea0c464b9..0778ec96d9904d028e43aca90b5ba2f6d91ee943 100644
+--- a/helix-term/src/main.rs
++++ b/helix-term/src/main.rs
+@@ -161,5 +161,24 @@ async fn main_impl() -> Result<i32> {
+ 
+     let exit_code = app.run(&mut EventStream::new()).await?;
+ 
++    // AROS: a language server that has not ended when the editor closes is
++    // still waited for (it cannot be stopped from outside), and hx returns to
++    // the Shell only after it ends. Tell the user why the prompt is late.
++    #[cfg(target_os = "aros")]
++    {
++        // Only after the shutdown requests timed out: a server that answered
++        // is ending by itself, and waiting for it is short.
++        let timed_out = app.language_servers_timed_out;
++        drop(app);
++        let running = helix_stdx::process::children_still_running();
++        if timed_out && running > 0 {
++            eprintln!(
++                "hx: waiting for {running} language server{} to end; Helix returns when {} ended.",
++                if running == 1 { "" } else { "s" },
++                if running == 1 { "it has" } else { "they have" }
++            );
++        }
++    }
++
+     Ok(exit_code)
+ }

@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 19:01:08 +0100
+Subject: [PATCH 08/10] AROS: hx-editor refuses to start without the hx
+ launcher
+
+The LSP build runs the editor on the program's own task (vfork from a
+pthread fails on AROS One), which needs a 16 MiB stack. Started directly
+from a Shell with its default stack, it would overflow. The hx launcher
+sets HELIX_PROGDIR; without it hx-editor says to use hx and ends with 20.
+---
+ helix-term/src/main.rs | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/helix-term/src/main.rs b/helix-term/src/main.rs
+index 0778ec96d9904d028e43aca90b5ba2f6d91ee943..55041a88d46086299d697a909df85cc6110a1002 100644
+--- a/helix-term/src/main.rs
++++ b/helix-term/src/main.rs
+@@ -44,6 +44,12 @@ fn main() -> Result<()> {
+ // futures on the initialized main task; this does not qualify cancellation.
+ #[cfg(target_os = "aros")]
+ fn main() -> Result<()> {
++    // The hx launcher runs this program with the 16 MiB stack it needs and
++    // sets HELIX_PROGDIR; started directly, it would overflow a Shell's stack.
++    if std::env::var_os("HELIX_PROGDIR").is_none() {
++        eprintln!("hx-editor: start Helix with the hx program next to it (it sets the stack Helix needs).");
++        std::process::exit(20);
++    }
+     std::process::exit(main_impl()?);
+ }
+ 

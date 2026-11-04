@@ -1,0 +1,166 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 19:00:57 +0100
+Subject: [PATCH 06/10] Report language servers that fail to start or
+ initialize, or that stop
+
+Helix logged these cases only, so a wrong server path or a server that
+crashed left a document without diagnostics and no word why.
+
+- A server that cannot be started shows "Language server NAME did not
+  start: ..." in the status line. A missing command is still silent when
+  it is a bare name (servers that are simply not installed), and reported
+  when it was configured by its path. "Loaded N files" at start-up no
+  longer replaces such an error.
+- A failed initialize request is reported with the server's name.
+- A server that ends while Helix still uses it reports that it stopped
+  unexpectedly (or ended before it was ready); a server stopped by Helix
+  keeps the old "Language server exited".
+
+One message per event; a document open retries the start once.
+---
+ Cargo.lock                    |  1 +
+ helix-lsp/Cargo.toml          |  1 +
+ helix-lsp/src/lib.rs          |  6 ++++++
+ helix-term/src/application.rs | 29 +++++++++++++++++++++++------
+ helix-view/src/editor.rs      | 19 +++++++++++++++++++
+ 5 files changed, 50 insertions(+), 6 deletions(-)
+
+diff --git a/Cargo.lock b/Cargo.lock
+index cee748173416939c0bbfb351659adfa981ce6961..006583b105d21e4a553af75267499c36f6203d44 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1493,6 +1493,7 @@ dependencies = [
+  "futures-util",
+  "globset",
+  "helix-core",
++ "helix-event",
+  "helix-loader",
+  "helix-lsp-types",
+  "helix-stdx",
+diff --git a/helix-lsp/Cargo.toml b/helix-lsp/Cargo.toml
+index 8abe59ec1b2ee5105b862968eaca2f869a7e0a76..8ca229dcccc682d7b4b59a7299a83e088dc82c34 100644
+--- a/helix-lsp/Cargo.toml
++++ b/helix-lsp/Cargo.toml
+@@ -14,6 +14,7 @@ homepage.workspace = true
+ 
+ [dependencies]
+ helix-stdx = { path = "../helix-stdx" }
++helix-event = { path = "../helix-event" }
+ helix-core = { path = "../helix-core" }
+ helix-loader = { path = "../helix-loader" }
+ helix-lsp-types = { path = "../helix-lsp-types" }
+diff --git a/helix-lsp/src/lib.rs b/helix-lsp/src/lib.rs
+index 2259e77e103a5334536c022c2e2f1295b0e80821..bb5f201c2449174bebdd14fd3831bf69f65ac2fd 100644
+--- a/helix-lsp/src/lib.rs
++++ b/helix-lsp/src/lib.rs
+@@ -928,6 +928,12 @@ fn start_client(
+ 
+         if let Err(e) = value {
+             log::error!("failed to initialize language server: {}", e);
++            helix_event::status::report(helix_event::status::StatusMessage {
++                severity: helix_event::status::Severity::Error,
++                message: format!("Language server {} failed to initialize: {e}", _client.name())
++                    .into(),
++            })
++            .await;
+             return;
+         }
+ 
+diff --git a/helix-term/src/application.rs b/helix-term/src/application.rs
+index 97f8e8b4aff388d56c23bcc9cdf8fef52876c09d..b3b469b83e18bbccdcba642140331c3369e86eef 100644
+--- a/helix-term/src/application.rs
++++ b/helix-term/src/application.rs
+@@ -203,11 +203,15 @@ pub fn new(args: Args, config: Config, lang_loader: syntax::Loader) -> Result<Se
+                 if nr_of_files == 0 {
+                     editor.new_file(Action::VerticalSplit);
+                 } else {
+-                    editor.set_status(format!(
+-                        "Loaded {} file{}.",
+-                        nr_of_files,
+-                        if nr_of_files == 1 { "" } else { "s" } // avoid "Loaded 1 files." grammo
+-                    ));
++                    // A language server that failed to start while the files
++                    // were opened has said so; keep that message visible.
++                    if !matches!(editor.status_msg, Some((_, Severity::Error))) {
++                        editor.set_status(format!(
++                            "Loaded {} file{}.",
++                            nr_of_files,
++                            if nr_of_files == 1 { "" } else { "s" } // avoid "Loaded 1 files." grammo
++                        ));
++                    }
+                     // align the view to center after all files are loaded,
+                     // does not affect views without pos since it is at the top
+                     let (view, doc) = current!(editor);
+@@ -854,7 +858,20 @@ macro_rules! language_server {
+                         // do nothing
+                     }
+                     Notification::Exit => {
+-                        self.editor.set_status("Language server exited");
++                        // A server still in the registry was not stopped by
++                        // Helix (:lsp-stop, :lsp-restart and quitting remove
++                        // it first): it ended by itself, so say so plainly.
++                        match self.editor.language_server_by_id(server_id) {
++                            Some(server) if server.is_initialized() => self.editor.set_error(format!(
++                                "Language server {} stopped unexpectedly; :lsp-restart starts it again",
++                                server.name()
++                            )),
++                            Some(server) => self.editor.set_error(format!(
++                                "Language server {} ended before it was ready",
++                                server.name()
++                            )),
++                            None => self.editor.set_status("Language server exited"),
++                        }
+ 
+                         // LSPs may produce diagnostics for files that haven't been opened in helix,
+                         // we need to clear those and remove the entries from the list if this leads to
+diff --git a/helix-view/src/editor.rs b/helix-view/src/editor.rs
+index 27dc452353c8372898cada46f4d482e2e9981bf7..ba8fac8f75a92b6b4ea9621946a0ee424c8b6310 100644
+--- a/helix-view/src/editor.rs
++++ b/helix-view/src/editor.rs
+@@ -1524,6 +1524,8 @@ fn launch_language_servers(&mut self, doc_id: DocumentId) {
+         let config = doc.config.load();
+         let root_dirs = &config.workspace_lsp_roots;
+ 
++        // Servers that were configured but did not start, for the status line.
++        let mut failed = Vec::new();
+         // store only successfully started language servers
+         let language_servers = lang.as_ref().map_or_else(HashMap::default, |language| {
+             self.language_servers
+@@ -1536,6 +1538,14 @@ fn launch_language_servers(&mut self, doc_id: DocumentId) {
+                             log::debug!(
+                                 "Language server not found for `{}` {} {}", language.scope, lang, err,
+                             );
++                            // A command given by its path was configured on
++                            // purpose: say that it is missing.
++                            if helix_stdx::env::names_a_path(err.command()) {
++                                failed.push(format!(
++                                    "Language server {lang} did not start: {} not found",
++                                    err.command()
++                                ));
++                            }
+                         } else {
+                             log::error!(
+                                 "Failed to initialize the language servers for `{}` - `{}` {{ {} }}",
+@@ -1543,12 +1553,21 @@ fn launch_language_servers(&mut self, doc_id: DocumentId) {
+                                 lang,
+                                 err
+                             );
++                            failed.push(format!("Language server {lang} did not start: {err}"));
+                         }
+                         None
+                     }
+                 })
+                 .collect::<HashMap<_, _>>()
+         });
++        drop(config);
++        // One line per attempt; a later failure replaces an earlier one.
++        if let Some(message) = failed.pop() {
++            self.set_error(message);
++        }
++        let Some(doc) = self.documents.get_mut(&doc_id) else {
++            return;
++        };
+ 
+         if language_servers.is_empty() && doc.language_servers.is_empty() {
+             return;

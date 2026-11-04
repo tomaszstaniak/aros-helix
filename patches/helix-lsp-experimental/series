@@ -2,3 +2,9 @@
 0002-EXPERIMENT-qualify-formatter-on-initialized-CRT-main.patch
 0003-EXPERIMENT-retain-multithread-runtime-and-poll-forma.patch
 0004-EXPERIMENT-AROS-LSP-build-starts-language-servers-on.patch
+0005-AROS-find-language-servers-in-the-Helix-drawer.patch
+0006-Report-language-servers-that-fail-to-start-or-initia.patch
+0007-AROS-say-that-quitting-waits-for-the-language-server.patch
+0008-AROS-hx-editor-refuses-to-start-without-the-hx-launc.patch
+0009-AROS-link-the-WAT-grammar.patch
+0010-AROS-writes-to-a-language-server-fail-once-it-has-en.patch

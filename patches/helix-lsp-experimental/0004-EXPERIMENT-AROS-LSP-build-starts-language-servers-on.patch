@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
 Date: Wed, 4 Nov 2026 16:26:26 +0100
-Subject: [PATCH 4/4] EXPERIMENT: AROS LSP build starts language servers only
+Subject: [PATCH 04/10] EXPERIMENT: AROS LSP build starts language servers only
 
 Problem: the process bridge lets every caller start programs, and its
 kill-on-drop guard refuses language servers, which Helix always starts

@@ -1,0 +1,187 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 19:36:06 +0100
+Subject: [PATCH 10/10] AROS: writes to a language server fail once it has
+ ended
+
+On AROS One a write to a pipe whose reader has ended does not fail, it
+waits. After a language server crashed, the next edit sent it a
+didChange; that write never returned, and Tokio waited for it when hx
+ended, so hx hung after its terminal was restored (seen on v11: hang
+after one edit, clean exit without edits).
+
+ChildStdin and ChildStdout of one child now share a flag: end of file on
+the child's stdout marks it ended, and later writes or flushes of its
+stdin fail with BrokenPipe at once instead of starting a blocking write.
+A write already under way when the child ends is not covered. A child
+that closes its stdout but keeps reading stdin would lose its input;
+language servers do not do that.
+
+process.rs is now also built for host tests on Unix; two tests cover a
+write after the child closed its output and a write to a running child.
+---
+ helix-stdx/Cargo.toml     |  1 +
+ helix-stdx/src/lib.rs     |  3 +-
+ helix-stdx/src/process.rs | 89 ++++++++++++++++++++++++++++++++++-----
+ 3 files changed, 82 insertions(+), 11 deletions(-)
+
+diff --git a/helix-stdx/Cargo.toml b/helix-stdx/Cargo.toml
+index a7d6737383b5d773f801936cd701e376ee88867c..1a9e19e46828a77242bd4fb28a47cae2edb0090e 100644
+--- a/helix-stdx/Cargo.toml
++++ b/helix-stdx/Cargo.toml
+@@ -38,6 +38,7 @@ libc = "0.2"
+ 
+ [dev-dependencies]
+ tempfile.workspace = true
++tokio = { version = "1", features = ["rt", "io-util", "fs", "time", "macros"] }
+ 
+ [lints.rust]
+ # Set by the experimental AROS LSP build (scripts/hx.py build --lsp-experimental).
+diff --git a/helix-stdx/src/lib.rs b/helix-stdx/src/lib.rs
+index e4d32edc84cd5fc5d0c3dc16553ee63f189277a1..d54d468c5710025a0b5118f833bb6ffaf74a5ebe 100644
+--- a/helix-stdx/src/lib.rs
++++ b/helix-stdx/src/lib.rs
+@@ -4,7 +4,8 @@
+ pub mod env;
+ pub mod faccess;
+ pub mod path;
+-#[cfg(target_os = "aros")]
++// Built for AROS; its host tests run on Unix.
++#[cfg(any(target_os = "aros", all(test, unix)))]
+ pub mod process;
+ 
+ #[cfg(target_os = "aros")]
+diff --git a/helix-stdx/src/process.rs b/helix-stdx/src/process.rs
+index 075b105e019b244b72606da5eebb2eccfbc2006d..c30f5c38ac8839233c5a75dbbfbcaf66fe6a446c 100644
+--- a/helix-stdx/src/process.rs
++++ b/helix-stdx/src/process.rs
+@@ -6,6 +6,7 @@
+ //! can be offered. In particular a DOS break signal is not POSIX SIGKILL.
+ use std::{ffi::OsStr, fmt, io, path::Path, pin::Pin,
+     process::{ExitStatus, Output, Stdio}, task::{Context, Poll}};
++use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
+ use tokio::{fs::File, io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf}};
+ 
+ const OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
+@@ -66,9 +67,10 @@ pub fn spawn(&mut self) -> io::Result<Child> {
+                 "this experimental AROS build starts language servers only"));
+         }
+         let mut inner = self.inner.spawn()?;
++        let ended = Arc::new(AtomicBool::new(false));
+         Ok(Child {
+-            stdin: inner.stdin.take().map(|p| ChildStdin(Some(pipe_file(p)))),
+-            stdout: inner.stdout.take().map(|p| ChildStdout(pipe_file(p))),
++            stdin: inner.stdin.take().map(|p| ChildStdin(Some(pipe_file(p)), ended.clone())),
++            stdout: inner.stdout.take().map(|p| ChildStdout(pipe_file(p), ended)),
+             stderr: inner.stderr.take().map(|p| ChildStderr(pipe_file(p))),
+             inner: Some(inner), kill_on_drop: self.kill_on_drop,
+         })
+@@ -162,8 +164,14 @@ async fn drain<R: AsyncRead + Unpin>(reader: Option<R>) -> io::Result<Vec<u8>> {
+     else { Ok(data) }
+ }
+ 
+-pub struct ChildStdin(Option<File>);
+-pub struct ChildStdout(File);
++/// The child's stdin. Writes fail with `BrokenPipe` once its stdout has
++/// reached end of file: on AROS a write to a pipe whose reader has ended
++/// does not fail but waits for ever, and Tokio would wait for that write
++/// when the program ends. A child that closes stdout but still reads stdin
++/// is not served; language servers do not do that.
++pub struct ChildStdin(Option<File>, Arc<AtomicBool>);
++/// The child's stdout; its end of file marks the child as ended for stdin.
++pub struct ChildStdout(File, Arc<AtomicBool>);
+ pub struct ChildStderr(File);
+ macro_rules! debug_pipe { ($t:ident) => {
+     impl fmt::Debug for $t {
+@@ -173,12 +181,18 @@ fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str(stringify
+ debug_pipe!(ChildStdin); debug_pipe!(ChildStdout); debug_pipe!(ChildStderr);
+ impl AsyncWrite for ChildStdin {
+     fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
++        if self.1.load(Ordering::SeqCst) {
++            return Poll::Ready(Err(io::Error::new(io::ErrorKind::BrokenPipe, "the child closed its output")));
++        }
+         match self.0.as_mut() {
+             Some(file) => Pin::new(file).poll_write(cx, buf),
+             None => Poll::Ready(Err(io::ErrorKind::BrokenPipe.into())),
+         }
+     }
+     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
++        if self.1.load(Ordering::SeqCst) {
++            return Poll::Ready(Err(io::Error::new(io::ErrorKind::BrokenPipe, "the child closed its output")));
++        }
+         match self.0.as_mut() { Some(file) => Pin::new(file).poll_flush(cx), None => Poll::Ready(Ok(())) }
+     }
+     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+@@ -188,11 +202,66 @@ fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Res
+         }
+     }
+ }
+-macro_rules! read_pipe { ($t:ident) => {
+-    impl AsyncRead for $t {
+-        fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+-            Pin::new(&mut self.0).poll_read(cx, buf)
++impl AsyncRead for ChildStdout {
++    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
++        let before = buf.filled().len();
++        let result = Pin::new(&mut self.0).poll_read(cx, buf);
++        if let Poll::Ready(Ok(())) = result {
++            if buf.filled().len() == before && buf.remaining() > 0 {
++                self.1.store(true, Ordering::SeqCst);
++            }
+         }
++        result
+     }
+-}; }
+-read_pipe!(ChildStdout); read_pipe!(ChildStderr);
++}
++impl AsyncRead for ChildStderr {
++    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
++        Pin::new(&mut self.0).poll_read(cx, buf)
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::Command;
++    use std::process::Stdio;
++    use tokio::io::{AsyncReadExt, AsyncWriteExt};
++
++    #[tokio::test]
++    async fn writes_fail_once_the_child_has_closed_its_output() {
++        let mut child = Command::new("sh")
++            .args(["-c", "exec >&-; cat >/dev/null"])
++            .stdin(Stdio::piped())
++            .stdout(Stdio::piped())
++            .spawn()
++            .unwrap();
++        let mut stdin = child.stdin.take().unwrap();
++        let mut stdout = child.stdout.take().unwrap();
++        // The child still reads: a write before end of file goes through.
++        stdin.write_all(b"before").await.unwrap();
++        stdin.flush().await.unwrap();
++        let mut rest = Vec::new();
++        stdout.read_to_end(&mut rest).await.unwrap();
++        assert!(rest.is_empty());
++        let err = stdin.write_all(b"after").await.unwrap_err();
++        assert_eq!(err.kind(), std::io::ErrorKind::BrokenPipe);
++        drop(stdin);
++        assert!(child.wait().await.unwrap().success());
++    }
++
++    #[tokio::test]
++    async fn a_running_child_gets_what_is_written() {
++        let mut child = Command::new("cat")
++            .stdin(Stdio::piped())
++            .stdout(Stdio::piped())
++            .spawn()
++            .unwrap();
++        let mut stdin = child.stdin.take().unwrap();
++        stdin.write_all(b"hello").await.unwrap();
++        stdin.shutdown().await.unwrap();
++        drop(stdin);
++        let mut out = Vec::new();
++        child.stdout.take().unwrap().read_to_end(&mut out).await.unwrap();
++        assert_eq!(out, b"hello");
++        assert!(child.wait().await.unwrap().success());
++    }
++}
