@@ -138,3 +138,15 @@ libgcc never fills `dwarf_reg_size_table` (AROS fixed its GCC patch in
 52bab89955, 2026-09-13). `hx.py build` now links libgcc's `unwind-dw2.o`
 rebuilt without that guard for ABIv1 (`build_unwind_fix`); with it C++ catches,
 the backtrace walks 7 frames, and `catch` and `tcatch` catch the panic.
+
+## conexit
+
+Question: does hx's console pattern at exit raise the v1 DOS alert when run
+again and again in one Shell? `conexit A|B|J MS`: a detached pthread (16 MiB
+stack) waits with WaitForChar(250 ms), reads, and sends the CONG geometry packet
+after empty slices, as libc-aros's poll and TIOCGWINSZ do; the main task sets
+raw mode with tcsetattr, writes frames, then stops the thread, restores cooked
+mode and returns without joining (A), in the other order (B), or with a join
+(J). Found (2026-11-04, nightly 20261031, Limpet 0.9.0): 51 runs in one Shell,
+all clean. The hx alert appears only in sessions started within the first
+minutes after boot, so the probe needs that timing too.
