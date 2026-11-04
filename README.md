@@ -11,10 +11,10 @@ script that turns them into an AROS executable.
 | | |
 |---|---|
 | Helix | 25.07.1 |
-| Port | preview 1 |
+| Port | aros3 |
 | Target | AROS x86_64 ABIv11 (AROS One) |
-| Terminal | Limpet 0.6.1 or later |
-| Syntax highlighting | Rust |
+| Terminal | Limpet 0.9.0 |
+| Syntax highlighting | Rust and WebAssembly text |
 
 ## What works
 
@@ -24,11 +24,15 @@ Helix's own colour theme; resizing the window; quitting back to a working
 Shell, or closing the window. Settings go to `ENVARC:helix/`, the log to
 `T:helix/`.
 
-Not yet: language servers, debug adapters, formatters, `:sh` and `:pipe`
-(Helix cannot start other programs on AROS yet), Git integration, the system
-clipboard, and grammars other than Rust. Large files (thousands of lines)
-open without highlighting, and screen updates are slower than on other
-systems.
+Iteration 3 includes wat_server 0.11.0 for WebAssembly text: live diagnostics,
+hover, symbols and formatting through LSP. Start `hx`; the launcher supplies
+the required stack and finds the server next to the editor.
+
+[Download aros3](https://github.com/tomaszstaniak/aros-helix/releases/tag/aros3).
+Separate formatters, `:sh`, `:pipe`, debug adapters and the system clipboard
+remain unavailable. A hung server can block shutdown. An unresolved memory
+corruption affecting Limpet was observed on AROS One; this release does not
+claim to fix it. See the release notes before using it on important files.
 
 See [using Helix on AROS](docs/README.md).
 

@@ -120,3 +120,15 @@ crossterm AROS source has host tests:
 
 On AROS, `experiments/term-probe` shows what the terminal layer reports and
 `experiments/winsize-fds` which descriptors give the window size.
+
+## Released aros3 sources
+
+Iteration 3 uses the base Helix series plus every patch in
+`patches/helix-lsp-experimental/series`; the directory name is historical.
+See its README for applying the series. Build with `--lsp-experimental`
+and package with `--lsp-experimental --iteration 3 --server <record.json>`.
+The release includes a supplementary source snapshot of the wat_server port
+and libc/std patches from rust-aros revision 6dca821, because that revision's
+full local history includes private evidence and is not published wholesale.
+The original v11 sysroot ancestry is not fully established: the recorded
+source patches do not establish a reproducible complete toolchain.

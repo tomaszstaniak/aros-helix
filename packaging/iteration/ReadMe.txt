@@ -83,15 +83,15 @@ Turning the language server off
 Limitations
 -----------
 - One language server was tested: wat_server for .wat files. Other servers
-  may or may not work; none is included, and rust-analyzer does not run
-  on AROS.
+  may or may not work; none is included. rust-analyzer is not included
+  or qualified by this release.
 - Only language servers are started. Separate formatter programs, :sh,
   :pipe and debug adapters still report "Helix for AROS starts language
   servers only" and nothing is started. :format works for .wat because
   the language server formats it.
-- AROS cannot stop a program from outside. When you quit, Helix asks the
-  server to end and waits for it: the status line shows that it is
-  waiting. A server that hangs keeps Helix from returning to the Shell
+- This build does not forcibly terminate servers. When you quit, Helix
+  asks the server to end and waits for it. A notice is printed in the
+  Shell window. A server that hangs keeps Helix from returning to the Shell
   until the server ends by itself, and :lsp-restart cannot end it either.
   wat_server ends normally within a few seconds.
 - A language server configured by name only that is not installed is
