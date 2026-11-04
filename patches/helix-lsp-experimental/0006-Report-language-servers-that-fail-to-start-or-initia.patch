@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
 Date: Wed, 4 Nov 2026 19:00:57 +0100
-Subject: [PATCH 06/10] Report language servers that fail to start or
+Subject: [PATCH 06/11] Report language servers that fail to start or
  initialize, or that stop
 
 Helix logged these cases only, so a wrong server path or a server that

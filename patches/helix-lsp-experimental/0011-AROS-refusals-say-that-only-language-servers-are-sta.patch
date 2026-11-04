@@ -1,0 +1,49 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 19:51:10 +0100
+Subject: [PATCH 11/11] AROS: refusals say that only language servers are
+ started
+
+:sh, :pipe and debug adapters reported "this experimental AROS build
+starts language servers only", and a configured formatter "starting
+programs from Helix is not supported on AROS yet", which is no longer
+true of this build. Both now read "Helix for AROS starts language
+servers only".
+---
+ helix-stdx/src/process.rs  | 2 +-
+ helix-view/src/document.rs | 5 +++--
+ 2 files changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/helix-stdx/src/process.rs b/helix-stdx/src/process.rs
+index c30f5c38ac8839233c5a75dbbfbcaf66fe6a446c..27ffe70467b4f9358346c02f4959e07a4f250ff8 100644
+--- a/helix-stdx/src/process.rs
++++ b/helix-stdx/src/process.rs
+@@ -64,7 +64,7 @@ pub fn spawn(&mut self) -> io::Result<Child> {
+         #[cfg(all(target_os = "aros", aros_lsp_cooperative))]
+         if !self.language_server {
+             return Err(io::Error::new(io::ErrorKind::Unsupported,
+-                "this experimental AROS build starts language servers only"));
++                "Helix for AROS starts language servers only"));
+         }
+         let mut inner = self.inner.spawn()?;
+         let ended = Arc::new(AtomicBool::new(false));
+diff --git a/helix-view/src/document.rs b/helix-view/src/document.rs
+index 8fdc5253420701f3902a1e76bb315d0c9a42fc0e..10b9e6b9b863c61b50a052877ef9a34c97cb992a 100644
+--- a/helix-view/src/document.rs
++++ b/helix-view/src/document.rs
+@@ -2306,12 +2306,13 @@ impl std::error::Error for FormatterError {}
+ impl Display for FormatterError {
+     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+         match self {
+-            // AROS: helix_stdx::process refuses every program before starting it.
++            // AROS: helix_stdx::process refuses every program but a language
++            // server before starting it.
+             #[cfg(target_os = "aros")]
+             Self::SpawningFailed { command, error } if *error == std::io::ErrorKind::Unsupported => {
+                 write!(
+                     f,
+-                    "Formatter {} was not run: starting programs from Helix is not supported on AROS yet",
++                    "Formatter {} was not run: Helix for AROS starts language servers only",
+                     command
+                 )
+             }

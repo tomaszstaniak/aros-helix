@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
 Date: Wed, 4 Nov 2026 19:01:08 +0100
-Subject: [PATCH 09/10] AROS: link the WAT grammar
+Subject: [PATCH 09/11] AROS: link the WAT grammar
 
 tree-sitter-wasm's wat grammar (the revision Helix 25.07.1's
 languages.toml names) is compiled into hx by the port's build, like the

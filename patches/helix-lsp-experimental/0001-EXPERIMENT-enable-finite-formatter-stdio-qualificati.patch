@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
 Date: Sun, 1 Nov 2026 02:16:26 +0100
-Subject: [PATCH 01/10] EXPERIMENT: enable finite formatter stdio qualification
+Subject: [PATCH 01/11] EXPERIMENT: enable finite formatter stdio qualification
 
 ---
  helix-stdx/Cargo.toml     |   2 +-

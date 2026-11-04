@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
 Date: Wed, 4 Nov 2026 19:00:57 +0100
-Subject: [PATCH 05/10] AROS: find language servers in the Helix drawer
+Subject: [PATCH 05/11] AROS: find language servers in the Helix drawer
 
 A bare command that is not on the path is also looked up in the drawer
 named by HELIX_PROGDIR, which the hx launcher sets to its own drawer.

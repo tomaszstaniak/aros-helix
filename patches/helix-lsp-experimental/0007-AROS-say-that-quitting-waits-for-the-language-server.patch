@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
 Date: Wed, 4 Nov 2026 19:01:08 +0100
-Subject: [PATCH 07/10] AROS: say that quitting waits for the language servers
+Subject: [PATCH 07/11] AROS: say that quitting waits for the language servers
 
 AROS cannot stop a program from outside, so quitting Helix waits until
 each language server has ended. Helix's own 3 s shutdown timeout only

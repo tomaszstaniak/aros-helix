@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
 Date: Wed, 4 Nov 2026 19:01:08 +0100
-Subject: [PATCH 08/10] AROS: hx-editor refuses to start without the hx
+Subject: [PATCH 08/11] AROS: hx-editor refuses to start without the hx
  launcher
 
 The LSP build runs the editor on the program's own task (vfork from a
