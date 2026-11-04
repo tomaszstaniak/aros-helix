@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 18:49:49 +0100
+Subject: [PATCH] AROS: timed parking on CLOCK_REALTIME, the clock AROS pthread
+ converts from
+
+AROS's pthread_cond_timedwait() ignores the condvar's clock attribute and
+makes the absolute timeout relative by subtracting gettimeofday(). With
+CLOCK_MONOTONIC (seconds since boot) the difference is negative and the
+timer request asks for a wait of many years, so every timed park ended
+only when another thread unparked it. Tokio parks this way with its
+parking_lot feature: its timers (sleep, timeout, Helix's redraw timer)
+fired only when something else woke the runtime.
+
+Use CLOCK_REALTIME for the timeout on AROS and leave the condvar's clock
+alone, as Rust's std does for AROS (sys/pal/unix/sync/condvar.rs).
+---
+ src/thread_parker/unix.rs | 14 ++++++++++----
+ 1 file changed, 10 insertions(+), 4 deletions(-)
+
+diff --git a/src/thread_parker/unix.rs b/src/thread_parker/unix.rs
+index 5953cf3403710f6434cfb869a312eb37c932634f..9de81180796771e96ebe25bc39d411c8a057cde1 100644
+--- a/src/thread_parker/unix.rs
++++ b/src/thread_parker/unix.rs
+@@ -127,12 +127,16 @@ impl super::ThreadParkerT for ThreadParker {
+ 
+ impl ThreadParker {
+     /// Initializes the condvar to use CLOCK_MONOTONIC instead of CLOCK_REALTIME.
+-    #[cfg(any(target_vendor = "apple", target_os = "android", target_os = "espidf"))]
++    ///
++    /// AROS: the pthread library ignores the condvar's clock and turns the
++    /// absolute timeout into a relative one with gettimeofday(), so the
++    /// timeout must be on CLOCK_REALTIME there (as Rust's std does for AROS).
++    #[cfg(any(target_vendor = "apple", target_os = "android", target_os = "espidf", target_os = "aros"))]
+     #[inline]
+     unsafe fn init(&self) {}
+ 
+     /// Initializes the condvar to use CLOCK_MONOTONIC instead of CLOCK_REALTIME.
+-    #[cfg(not(any(target_vendor = "apple", target_os = "android", target_os = "espidf")))]
++    #[cfg(not(any(target_vendor = "apple", target_os = "android", target_os = "espidf", target_os = "aros")))]
+     #[inline]
+     unsafe fn init(&self) {
+         let mut attr = MaybeUninit::<libc::pthread_condattr_t>::uninit();
+@@ -200,9 +204,11 @@ fn timespec_now() -> libc::timespec {
+ #[inline]
+ fn timespec_now() -> libc::timespec {
+     let mut now = MaybeUninit::<libc::timespec>::uninit();
+-    let clock = if cfg!(target_os = "android") {
++    let clock = if cfg!(any(target_os = "android", target_os = "aros")) {
+         // Android doesn't support pthread_condattr_setclock, so we need to
+-        // specify the timeout in CLOCK_REALTIME.
++        // specify the timeout in CLOCK_REALTIME. AROS's pthread converts the
++        // timeout with gettimeofday(): a CLOCK_MONOTONIC time (seconds since
++        // boot) became a wait of many years there, ended only by an unpark.
+         libc::CLOCK_REALTIME
+     } else {
+         libc::CLOCK_MONOTONIC
