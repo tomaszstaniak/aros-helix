@@ -190,3 +190,29 @@ aros-v1-x86-20261104 with rust-aros 321495a's std change): unset and empty
 `Some("RAM:home")`; `HOME` is not set on that nightly by default. The binary
 no longer calls posixc's `getpwuid_r`, whose `usergroup.library` open from a
 worker led to the v1 dos alert (see pkttrap).
+
+## timer-probe
+
+Question: do timed waits end on time on AROS without an outside wake-up?
+Helix drew a language server's diagnostics only at the next key. Run:
+`python3 scripts/hx.py build --target <target> --probe timer-probe`, then
+`timer-probe` in a Shell. Found (2026-11-04, AROS One 1.3): std's
+`park_timeout` ends on time; parking_lot's `Condvar::wait_for` and Tokio's
+`sleep` (current-thread and multi-thread runtimes, with Tokio's parking_lot
+feature as in hx) waited until the probe woke them from outside after 3 s.
+AROS's pthread turns a condvar's absolute timeout into a relative one with
+`gettimeofday()`, but parking_lot_core gives it a `CLOCK_MONOTONIC` time
+(seconds since boot), which becomes a wait of many years. With
+patches/crates/parking_lot_core-0.9.11 all waits end within 400 ms.
+`std::fs::canonicalize("PROGDIR:...")` fails there with ENOENT, so the
+launcher (src/launcher) passes its drawer to hx instead.
+
+## mini-lsp
+
+A small language server for failure tests (C, Content-Length framing over
+stdio): `mini-lsp MODE LOG [SECONDS]` with the modes normal,
+ignore-shutdown, spin, crash (exits after the document is opened), stall and
+bad-init (answers initialize with an error). Built with the target's C
+compiler and SDK, e.g. `x86_64-aros-gcc --sysroot=<SDK> -O2 -Wall -o
+mini-lsp mini_lsp.c`; configured as a language server in a test
+languages.toml.
