@@ -55,6 +55,14 @@ under `"targets": {"aros-x86_64-abiv1-pc": {...}}` in `local.json`. It needs a
 rust-aros commit whose libc-aros has the 168-byte `pthread_attr_t` (43b3798
 or later) and links the SDK's own libpthread.
 
+Both targets' toolchains need std from rust-aros's `patch-std.py` with step
+9g (321495a): on AROS `std::env::home_dir()` uses `HOME` only. Without it,
+`home_dir()` in hx's editor thread calls posixc's `getpwuid_r`, which on v1
+(nightly 20261031) leads to a use-after-free in the C runtime at exit and the
+dos alert 0x07000004. Candidate 6 uses `aros-v1-x86-20261104` (rust-aros
+c1b5e67: the candidate 5 sysroot base 0b7dca2 plus that step) and
+`aros-helix-20261104` (the earlier v11 sysroot with the same change).
+
 `package` writes candidates and their sums (`SHA256SUMS-<version>`) to
 `dist/unreleased/` only. `package --unstripped` packs the same linked binary
 without stripping it, as `...-candidate<N>-unstripped-<target>.zip`, for
