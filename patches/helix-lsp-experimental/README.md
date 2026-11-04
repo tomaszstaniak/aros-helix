@@ -25,6 +25,7 @@ To build: materialize as usual, then in `work/helix` create a branch from
 | 0008 | iteration 3 | hx-editor refuses to start without the launcher (it would overflow a Shell's stack) |
 | 0009 | iteration 3 | the WAT grammar is linked (tree-sitter-wasm, directory wat) |
 | 0010 | iteration 3 | stdin writes fail with BrokenPipe after the child's stdout ended: on AROS One a write to a pipe without a reader waits for ever, and hx hung at quit after a crashed server and an edit; host tests |
+| 0011 | iteration 3 | refusals of :sh, :pipe, formatters and debug adapters read "Helix for AROS starts language servers only" |
 
 Not taken from the bridge: owner service, forced stop (v1 only, need a
 patched posixc 0.47), non-blocking pipe IO (AROS One rejects O_NONBLOCK),
