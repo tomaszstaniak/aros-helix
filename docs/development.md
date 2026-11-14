@@ -10,7 +10,8 @@ updated: 2026-10-19
 | Target | State |
 |---|---|
 | x86_64 ABIv11 (AROS One 1.3), `aros-x86_64-abiv11-pc` | built and run |
-| x86_64 mainline (ABIv1), `aros-x86_64-abiv1-pc` | built and run (nightly 20261031) |
+| x86_64 mainline (ABIv1), `aros-x86_64-abiv1-pc` | built and run (nightly 20261113) |
+| Raspberry Pi, AArch64 mainline (ABIv1), `aros-aarch64-abiv1-raspi` | built and run under QEMU raspi3b (nightly 20261110) |
 | aarch64 | not built |
 
 ABIv11 comes first because the terminal (Limpet) and the Rust environment are
@@ -132,3 +133,23 @@ and libc/std patches from rust-aros revision 6dca821, because that revision's
 full local history includes private evidence and is not published wholesale.
 The original v11 sysroot ancestry is not fully established: the recorded
 source patches do not establish a reproducible complete toolchain.
+
+## Raspberry Pi
+
+`--target aros-aarch64-abiv1-raspi` builds with the unix AArch64 profile of
+rust-aros (`profiles/aarch64-v1-raspi-unix.json`, rust-aros 42e16d9 or later,
+a toolchain made by its `tools/common-sysroot.py`). Name the Pi SDK's
+`aarch64-aros-gcc` driver (Clang) as `aros_gcc` under
+`"targets": {"aros-aarch64-abiv1-raspi": {...}}`. That toolchain has no
+unwinder library, so the build uses `panic=abort`; the script wraps the
+compiler to drop the `--target` argument cc-rs derives, and defines
+`_GNU_SOURCE` for tree-sitter's C sources (the SDK declares `fdopen` only
+then). Package without `--lsp-experimental`: mainline builds start no
+language server.
+
+    python3 scripts/hx.py build --target aros-aarch64-abiv1-raspi
+    python3 scripts/hx.py package --target aros-aarch64-abiv1-raspi --iteration N
+
+On mainline x86_64, when the GCC build tree named by `gcc_build` is gone, the
+unwinder object rebuilt earlier for the same libgcc is reused from the build
+root.

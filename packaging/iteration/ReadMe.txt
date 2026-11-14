@@ -1,4 +1,4 @@
-Helix 25.07.1 for AROS, port iteration 3
+Helix 25.07.1 for AROS, port iteration @ITERATION@
 ========================================
 
 Helix is a modal text editor (https://helix-editor.com). This is a native
@@ -6,13 +6,20 @@ AROS build of the Helix 25.07.1 release for
 @SYSTEM@.
 It is an early version: use it on files you have copies of.
 
-This iteration can start a language server. It includes one, wat_server
+[[lsp]]
+This build can start a language server. It includes one, wat_server
 0.11.0 for WebAssembly text files (.wat), which gives Helix diagnostics,
 hover, symbols and formatting for .wat files.
+[[/lsp]]
+[[nolsp]]
+This build is the editor without language servers: on this system a
+language server cannot yet be run reliably, so none is started or
+included.
+[[/nolsp]]
 
 Requirements
 ------------
-- Limpet 0.9.0 (@LIMPET@ from
+- Limpet @LIMPET_VERSION@ or later (apkg install limpet, or @LIMPET@ from
   https://github.com/tomaszstaniak/limpet/releases). Start Helix in a
   Limpet window: the AROS console (CON:) does not understand the terminal
   sequences Helix uses.
@@ -23,7 +30,7 @@ Installing
 Unpack the archive anywhere, for example to SYS: (or Work:, if your system
 has it), which gives the drawer SYS:Helix. Keep its files together:
 
-    UnZip Helix-25.07.1-aros3-abiv11.zip -d SYS:
+    UnZip @ARCHIVE@ -d SYS:
 
 To call Helix as hx from any Shell, add to S:User-Startup (with your
 drawer):
@@ -32,20 +39,23 @@ drawer):
 
 Start Helix with hx. hx is a small program that runs the editor
 (hx-editor) with the 16 MB stack it needs; you do not set a stack
-yourself, and hx-editor is not started directly. No settings need to be
-changed: Helix finds wat_server in its own drawer.
+yourself, and hx-editor is not started directly.[[lsp]] No settings need to be
+changed: Helix finds wat_server in its own drawer.[[/lsp]]
 
 Using
 -----
     hx notes.txt          edit a file
     hx --tutor            the tutorial
+[[lsp]]
     hx --health wat       what this build finds for .wat files
+[[/lsp]]
 
 Quit with :q, or :wq to save first; :q! quits without saving.
 
 Settings (config.toml, languages.toml, your own themes) go to ENVARC:helix,
 the log to T:helix/helix.log. Files are read and written as UTF-8.
 
+[[lsp]]
 Trying the language server
 --------------------------
     Copy SYS:Helix/example.wat RAM:
@@ -80,8 +90,10 @@ Turning the language server off
   To undo, copy it back, or delete the two lines (or the file, if you
   created it).
 
+[[/lsp]]
 Limitations
 -----------
+[[lsp]]
 - One language server was tested: wat_server for .wat files. Other servers
   may or may not work; none is included. rust-analyzer is not included
   or qualified by this release.
@@ -97,21 +109,34 @@ Limitations
 - A language server configured by name only that is not installed is
   skipped without a message, as in Helix on other systems; one
   configured by its path that is missing is reported.
+[[/lsp]]
+[[nolsp]]
+- No language servers, formatter programs, :sh, :pipe or debug adapters:
+  Helix reports that the program was not started.
+[[/nolsp]]
+[[pi]]
+- If Helix itself fails with an internal error (a panic), the program
+  stops at once and the window may be left in the editor's screen mode;
+  close the Limpet window.
+- Tested under QEMU's Raspberry Pi model, not on a real Raspberry Pi.
+[[/pi]]
 - Syntax highlighting for Rust and WebAssembly text only. Large Rust files
   open without highlighting.
 - No system clipboard (yank and paste work inside Helix). Screen updates
   are slower than on other systems.
+[[v11]]
 - On AROS One, in tests of earlier Helix builds, Limpet's own program
   code was found overwritten twice, and Limpet once stopped with a
   Software Failure. The cause is not known and is not fixed. If Limpet or
   Helix stops with a Software Failure, reboot before you continue.
+[[/v11]]
 
 Licence
 -------
 Helix is distributed under the Mozilla Public License 2.0 (LICENSE.txt);
 THIRD-PARTY.txt lists the components built into hx-editor, and licenses/
-holds the licences of its syntax grammars. wat_server is distributed
+holds the licences of its syntax grammars.[[lsp]] wat_server is distributed
 under the MIT licence (wat_server-LICENSE.txt); wat_server-THIRD-PARTY.txt
-lists its components. Sources and build instructions:
-https://github.com/tomaszstaniak/aros-helix and
-https://github.com/g-plane/wasm-language-tools (wat_server 0.11.0).
+lists its components.[[/lsp]] Sources and build instructions:
+https://github.com/tomaszstaniak/aros-helix[[lsp]] and
+https://github.com/g-plane/wasm-language-tools (wat_server 0.11.0)[[/lsp]].

@@ -1,7 +1,7 @@
 # Helix for AROS
 
 [Helix](https://helix-editor.com), the modal text editor, built as a native
-AROS x86_64 program. It runs in [Limpet](https://github.com/tomaszstaniak/limpet),
+AROS program for x86_64 PCs and the Raspberry Pi. It runs in [Limpet](https://github.com/tomaszstaniak/limpet),
 the AROS terminal.
 
 This repository holds the port, not a copy of Helix: the pinned upstream
@@ -11,9 +11,9 @@ script that turns them into an AROS executable.
 | | |
 |---|---|
 | Helix | 25.07.1 |
-| Port | aros3 |
-| Target | AROS x86_64 ABIv11 (AROS One) |
-| Terminal | Limpet 0.9.0 |
+| Port | aros3 (ABIv11), aros4 (mainline) |
+| Targets | x86_64 ABIv11 distributions (AROS One); mainline AROS (ABIv1) on x86_64; native AROS on the Raspberry Pi |
+| Terminal | Limpet 0.9.0 or later; 0.10.1 for the mainline builds |
 | Syntax highlighting | Rust and WebAssembly text |
 
 ## What works
@@ -28,7 +28,11 @@ Iteration 3 includes wat_server 0.11.0 for WebAssembly text: live diagnostics,
 hover, symbols and formatting through LSP. Start `hx`; the launcher supplies
 the required stack and finds the server next to the editor.
 
-[Download aros3](https://github.com/tomaszstaniak/aros-helix/releases/tag/aros3).
+Iteration 4 is the editor for mainline AROS on x86_64 and on the Raspberry Pi,
+without language servers: on mainline the editor stops responding when a
+server is started, so those builds start none.
+
+Download [aros3](https://github.com/tomaszstaniak/aros-helix/releases/tag/aros3) for ABIv11 systems, [aros4](https://github.com/tomaszstaniak/aros-helix/releases/tag/aros4) for mainline x86_64 and the Raspberry Pi.
 Separate formatters, `:sh`, `:pipe`, debug adapters and the system clipboard
 remain unavailable. A hung server can block shutdown. An unresolved memory
 corruption affecting Limpet was observed on AROS One; this release does not

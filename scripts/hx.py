@@ -13,6 +13,7 @@ Commands (run `hx.py COMMAND --help`):
 Nothing here edits upstream/helix, a shared toolchain, the SDK or the Cargo
 registry. Existing work copies are never reset or recreated.
 """
+import shlex
 import argparse
 import hashlib
 import io
@@ -58,7 +59,15 @@ TARGETS = {
                               "wctype_shim": True, "panic": "unwind", "unwind_fix": False},
     "aros-x86_64-abiv1-pc": {"abi_byte": 1, "spec": "profiles/x86_64-v1-pc.json", "pthread": "sdk",
                              "wctype_shim": False, "panic": "unwind", "unwind_fix": True},
+    # Native Raspberry Pi (mainline). The Clang toolchain has no unwinder library: a panic aborts.
+    "aros-aarch64-abiv1-raspi": {"abi_byte": 1, "spec": "profiles/aarch64-v1-raspi-unix.json", "pthread": "sdk",
+                                 "wctype_shim": False, "panic": "abort", "unwind_fix": False, "arch": "aarch64"},
 }
+
+
+def cargo_target(target):
+    """Cargo's name for the target: the stem of its JSON file."""
+    return TARGETS[target].get("arch", "x86_64") + "-aros"
 DEFAULT_TARGET = "aros-x86_64-abiv11-pc"
 
 # key: (environment variable, default, description)
@@ -308,6 +317,15 @@ def build_unwind_fix(cfg, root):
                           "panic aborts; set gcc_build (HX_GCC_BUILD) to that toolchain's GCC build tree")
         build = Path(cfg["gcc_build"])
         g = build / "gen/host/tools/crosstools/gnu/gcc"
+        if not (g / "gcc/xgcc").exists():
+            # The GCC build tree is gone: an object rebuilt earlier for the same libgcc
+            # object (same disassembly and relocations) is still the right replacement.
+            same = disassembly(stock)
+            for cached in sorted(root.glob("unwind-fix-*/unwind.json")):
+                record = json.loads(cached.read_text())
+                if record["inputs"]["stock"] == same and sha256_file(cached.parent / "unwind-dw2.o") == record["object"]:
+                    return cached.parent / "unwind-dw2.o"
+            raise Failure(f"{g}/gcc/xgcc is missing and {root} has no rebuilt unwinder for {libgcc}")
         source = build / "Ports/host/gcc/gcc-10.5.0/libgcc/unwind-dw2.c"
         toolchain = Path(gcc).parent
         inputs = {"source": sha256_file(source), "stock": disassembly(stock), "xgcc": sha256_file(g / "gcc/xgcc"),
@@ -467,7 +485,7 @@ def target_spec(cfg, rtree):
     # rust-aros profiles carry no machine paths: add the linker and SDK. libpthread
     # comes last, after libc-aros's objects that call it.
     spec = json.loads((rtree / info["spec"]).read_text())
-    spec["linker"] = cfg["aros_gcc"]
+    spec["linker"] = cfg.get("cc", cfg["aros_gcc"])
     spec["pre-link-args"] = {"gnu-cc": [f"--sysroot={cfg['aros_sdk']}"]}
     spec["late-link-args"] = {"gnu-cc": ["-lpthread"]}
     return json.dumps(spec, indent=2, sort_keys=True) + "\n"
@@ -586,6 +604,15 @@ def cmd_build(args):
         raise Failure(f"toolchain {cfg['toolchain']} reports `{rustc}`, expected `{cfg['rustc_version']}`")
     root = Path(cfg["build_root"])
     root.mkdir(parents=True, exist_ok=True)
+    cfg["cc"] = cfg["aros_gcc"]
+    if info.get("arch") == "aarch64":
+        # cc-rs derives a Clang --target from the Rust target; Clang does not know its
+        # "abiv1" environment, and the SDK's driver wrapper already selects the target.
+        wrapper = root / "aarch64-aros-cc"
+        wrapper.write_text('#!/bin/sh\nfor a do shift; case "$a" in --target=*) ;; *) set -- "$@" "$a" ;; esac; done\n'
+                           "exec " + shlex.quote(cfg["aros_gcc"]) + ' "$@"\n')
+        wrapper.chmod(0o755)
+        cfg["cc"] = str(wrapper)
 
     src = root / "src"
     stage_tree(WORK / "helix", src)
@@ -609,7 +636,8 @@ def cmd_build(args):
     if not libc.exists():
         run([sys.executable, rtree / "tools/libc-dual.py", rtree / "std-groundwork/libc-aros", libc,
              "--cargo-home", cfg["cargo_home"]])
-    target_json = root / "x86_64-aros.json"
+    tname = cargo_target(args.target)
+    target_json = root / f"{tname}.json"
     text = target_spec(cfg, rtree)
     if not target_json.exists() or target_json.read_text() != text:
         target_json.write_text(text)
@@ -676,12 +704,16 @@ def cmd_build(args):
                # copy sits inside this repository, whose commit is not Helix's.
                GIT_CEILING_DIRECTORIES=str(root),
                # The C parts (tree-sitter's runtime) for the cc crate.
-               CC_x86_64_aros=cfg["aros_gcc"], AR_x86_64_aros=cfg["aros_ar"],
+               **{"CC_" + tname.replace("-", "_"): cfg["cc"], "AR_" + tname.replace("-", "_"): cfg["aros_ar"]},
                # The cc crate asks for PIC; AROS executables are static, and PIC
                # objects reference a _GLOBAL_OFFSET_TABLE_ the link never has.
                # -ffile-prefix-map: C assertions name their source file; no host path.
-               CFLAGS_x86_64_aros=f"--sysroot={cfg['aros_sdk']} -fno-PIC -ffile-prefix-map={root}=/build "
-                                  f"-ffile-prefix-map={cfg['cargo_home']}=/cargo")
+               **{"CFLAGS_" + tname.replace("-", "_"):
+                  f"--sysroot={cfg['aros_sdk']} -fno-PIC -ffile-prefix-map={root}=/build "
+                  f"-ffile-prefix-map={cfg['cargo_home']}=/cargo"
+                  # tree-sitter asks for POSIX 2001 only; the SDK declares fdopen under
+                  # _GNU_SOURCE or _XOPEN_SOURCE, and Clang refuses the implicit declaration.
+                  + (" -D_GNU_SOURCE" if info.get("arch") == "aarch64" else "")})
     cargo = ["cargo", "+" + cfg["toolchain"]]
     # The lock pins upstream libc 0.2.174; the AROS libc is 0.2.189.
     run(cargo + ["update", "--offline", "-p", "libc@0.2.174", "--precise", "0.2.189"] + patch,
@@ -701,7 +733,7 @@ def cmd_build(args):
                      capture=False, check=False)
         if result.returncode:
             raise Failure(f"cargo build failed ({result.returncode})")
-        print(root / "probe-target/x86_64-aros/release" / args.probe)
+        print(root / "probe-target" / tname / "release" / args.probe)
         return
     command = cargo + ["build", "--release", "--offline", "-p", "helix-term", "--no-default-features",
                        "--target", target_json, "-Zbuild-std=std,panic_" + panic, "-Zjson-target-spec",
@@ -709,7 +741,7 @@ def cmd_build(args):
     result = run(command, cwd=src, env=env, capture=False, check=False)
     if result.returncode:
         raise Failure(f"cargo build failed ({result.returncode})")
-    binary = root / "target/x86_64-aros/release/hx"
+    binary = root / "target" / tname / "release/hx"
     abi_byte = binary.read_bytes()[8]
     if abi_byte != info["abi_byte"]:
         raise Failure(f"{binary} has ELF ABI version {abi_byte}, {args.target} needs {info['abi_byte']}")
@@ -747,10 +779,27 @@ PACKAGE_VERSION = "25.07.1-preview2"
 # Words the ReadMe template fills in per target.
 README_FIELDS = {
     "aros-x86_64-abiv11-pc": {"@SYSTEM@": "AROS x86_64 ABIv11 (AROS One and other ABIv11 systems); tested on AROS One 1.3",
-                              "@LIMPET@": "Limpet-0.9.0-aros-x86_64-abiv11-pc.zip"},
-    "aros-x86_64-abiv1-pc": {"@SYSTEM@": "mainline AROS x86_64 (ABIv1); tested on the nightly build of 2026-10-31",
-                             "@LIMPET@": "Limpet-0.9.0-aros-x86_64-abiv1-pc.zip"},
+                              "@LIMPET_VERSION@": "0.9.0", "@LIMPET@": "Limpet-0.9.0-aros-x86_64-abiv11-pc.zip"},
+    "aros-x86_64-abiv1-pc": {"@SYSTEM@": "mainline AROS x86_64 (ABIv1); tested on the nightly build of 2026-11-13",
+                             "@LIMPET_VERSION@": "0.10.1", "@LIMPET@": "Limpet-0.10.1-aros-x86_64-abiv1-pc.zip"},
+    "aros-aarch64-abiv1-raspi": {"@SYSTEM@": "native AROS on the Raspberry Pi (AArch64, ABIv1); tested on the nightly build\nof 2026-11-10 under QEMU",
+                                 "@LIMPET_VERSION@": "0.10.1", "@LIMPET@": "Limpet-0.10.1-aros-aarch64-abiv1-raspi.zip"},
 }
+
+
+def readme_text(template, target, fields, lsp):
+    """The archive's ReadMe: [[tag]]...[[/tag]] blocks stay for lsp/nolsp builds, the
+    ABIv11 system (v11) and the Raspberry Pi (pi); @FIELD@ words are replaced."""
+    keep = {"lsp": lsp, "nolsp": not lsp, "v11": target == "aros-x86_64-abiv11-pc",
+            "pi": target == "aros-aarch64-abiv1-raspi"}
+    for tag, wanted in keep.items():
+        template = re.sub(rf"\[\[{tag}\]\]\n?(.*?)\[\[/{tag}\]\]\n?", (lambda m: m.group(1)) if wanted else "", template, flags=re.S)
+    for word, value in fields.items():
+        template = template.replace(word, value)
+    left = re.findall(r"@[A-Z_]+@|\[\[/?\w+\]\]", template)
+    if left:
+        raise Failure(f"ReadMe template: nothing for {left}")
+    return template
 
 
 def cmd_package(args):
@@ -778,8 +827,8 @@ def cmd_package(args):
     if (args.iteration is None) == (args.candidate is None):
         raise Failure("give either --candidate N or --iteration N")
     if args.iteration is not None:
-        if not lsp or args.unstripped:
-            raise Failure("--iteration packs the LSP build (--lsp-experimental), stripped")
+        if args.unstripped:
+            raise Failure("--iteration packs the stripped build")
         package_iteration(args, cfg, root, record, binary)
         return
     dist = REPO / "dist" / "unreleased"
@@ -829,7 +878,7 @@ def cmd_package(args):
 
 
 # Archive suffix per target in the port's iteration names (Helix-25.07.1-aros1-abiv11.zip).
-ITERATION_ABI = {"aros-x86_64-abiv11-pc": "abiv11", "aros-x86_64-abiv1-pc": "abiv1"}
+ITERATION_ABI = {"aros-x86_64-abiv11-pc": "abiv11", "aros-x86_64-abiv1-pc": "abiv1", "aros-aarch64-abiv1-raspi": "raspi"}
 
 
 def package_iteration(args, cfg, root, record, binary):
@@ -848,8 +897,9 @@ def package_iteration(args, cfg, root, record, binary):
     archive, listing, sums = dist / f"{name}.zip", dist / f"{name}.contents.sha256", dist / "SHA256SUMS"
     if archive.exists() or listing.exists() or (sums.exists() and f"  {archive.name}\n" in sums.read_text()):
         raise Failure(f"{archive} exists; delivered archives are never replaced")
-    server = json.loads(Path(args.server).read_text())
-    if sha256_file(server["binary"]) != server["sha256"]:
+    # A build that starts no language server carries none.
+    server = json.loads(Path(args.server).read_text()) if args.server else None
+    if server and sha256_file(server["binary"]) != server["sha256"]:
         raise Failure(f"{server['binary']} does not match the sha256 in {args.server}")
     extra = REPO / "packaging/iteration"
     with tempfile.TemporaryDirectory(prefix="hx-package-") as tmp:
@@ -859,8 +909,9 @@ def package_iteration(args, cfg, root, record, binary):
         run([cfg["aros_gcc"].replace("-gcc", "-strip"), "--strip-unneeded", "--remove-section", ".comment",
              "-o", top / "hx-editor", binary])
         shutil.copyfile(launcher, top / "hx")
-        shutil.copyfile(server["binary"], top / "wat_server")
-        for exe in ("hx", "hx-editor", "wat_server"):
+        if server:
+            shutil.copyfile(server["binary"], top / "wat_server")
+        for exe in ("hx", "hx-editor") + (("wat_server",) if server else ()):
             # UnZip restores these bits on AROS; without x the file has no `e` bit.
             (top / exe).chmod(0o755)
         runtime = WORK / "helix" / "runtime"
@@ -868,18 +919,17 @@ def package_iteration(args, cfg, root, record, binary):
             shutil.copytree(runtime / "queries" / grammar, top / "runtime/queries" / grammar)
         shutil.copytree(runtime / "themes", top / "runtime/themes")
         shutil.copyfile(runtime / "tutor", top / "runtime/tutor")
-        readme = (extra / "ReadMe.txt").read_text()
-        for word, value in README_FIELDS[args.target].items():
-            readme = readme.replace(word, value)
-        left = re.findall(r"@[A-Z_]+@", readme)
-        if left:
-            raise Failure(f"packaging/iteration/ReadMe.txt: no value for {left}")
+        readme = readme_text((extra / "ReadMe.txt").read_text(), args.target,
+                             dict(README_FIELDS[args.target], **{"@ITERATION@": str(args.iteration), "@ARCHIVE@": archive.name}),
+                             bool(server))
         (top / "ReadMe.txt").write_text(readme)
-        shutil.copyfile(extra / "example.wat", top / "example.wat")
+        if server:
+            shutil.copyfile(extra / "example.wat", top / "example.wat")
         shutil.copyfile(WORK / "helix" / "LICENSE", top / "LICENSE.txt")
         shutil.copyfile(root / "THIRD-PARTY.txt", top / "THIRD-PARTY.txt")
-        shutil.copyfile(server["license"], top / "wat_server-LICENSE.txt")
-        shutil.copyfile(server["third_party"], top / "wat_server-THIRD-PARTY.txt")
+        if server:
+            shutil.copyfile(server["license"], top / "wat_server-LICENSE.txt")
+            shutil.copyfile(server["third_party"], top / "wat_server-THIRD-PARTY.txt")
         # Licence texts of the grammars compiled into hx-editor.
         (top / "licenses").mkdir()
         for ident, _ in GRAMMARS.values():
@@ -935,7 +985,7 @@ ACCEPTANCE_SCENARIOS = (
     "repeated-sessions",  # several hx sessions in one boot, documents on SYS: and in RAM:
     "clean-exit",         # hx and Limpet return 0, no process left, no system alert
 )
-ACCEPTANCE_ABI = {"aros-x86_64-abiv11-pc": "v11", "aros-x86_64-abiv1-pc": "v1"}
+ACCEPTANCE_ABI = {"aros-x86_64-abiv11-pc": "v11", "aros-x86_64-abiv1-pc": "v1", "aros-aarch64-abiv1-raspi": "v1"}
 
 
 def check_acceptance(path, source, digest, target):
