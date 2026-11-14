@@ -37,3 +37,7 @@ From these archives, with Limpet 0.10.1: start with a Rust file, an edit saved a
 
 - mainline x86_64: nightly build of 2026-11-13 in QEMU;
 - Raspberry Pi: nightly build of 2026-11-10 in QEMU (raspi3b).
+
+### Sources
+
+The Helix patches, launcher and build script are in this release tag; the Rust environment is [rust-aros](https://github.com/tomaszstaniak/rust-aros) at `d3cff10`.
